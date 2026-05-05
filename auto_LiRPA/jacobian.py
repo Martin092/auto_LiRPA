@@ -19,7 +19,7 @@
 import torch
 from auto_LiRPA.bound_ops import JacobianOP, GradNorm  # pylint: disable=unused-import
 from auto_LiRPA.bound_ops import (
-    BoundInput, BoundAdd, BoundRelu, BoundJacobianInit,
+    BoundInput, BoundAdd, BoundRelu, BoundJacobianInit, BoundJacobianZero,
     BoundJacobianOP)
 from auto_LiRPA.utils import logger, prod
 from collections import deque
@@ -59,16 +59,26 @@ def expand_jacobian_node(self, jacobian_node):
 
     output_node = jacobian_node.inputs[0]
     input_node = jacobian_node.inputs[1]
+    replacement_node = build_jacobian_graph(self, output_node, input_node)
+    self.replace_node(jacobian_node, replacement_node)
+
+
+def build_jacobian_graph(
+        self, output_node, input_node, prefix=None, allow_unused=False):
     batch_size = output_node.output_shape[0]
     output_dim = prod(output_node.output_shape[1:])
+    prefix = f'/jacobian{output_node.name}' if prefix is None else prefix
 
     # Gradient values in `grad` may not be accurate. We do not consider gradient
     # accumulation from multiple succeeding nodes. We only want the shapes but
     # not the accurate values.
     grad = {}
     # Dummy values in grad_start
+    forward_value = getattr(output_node, 'forward_value', None)
+    dtype = forward_value.dtype if isinstance(forward_value, torch.Tensor) else None
     grad_start = torch.ones(batch_size, output_dim,
-                            *output_node.output_shape[1:], device=self.device)
+                            *output_node.output_shape[1:],
+                            dtype=dtype, device=self.device)
     grad[output_node.name] = grad_start
     input_node_found = False
 
@@ -91,9 +101,15 @@ def expand_jacobian_node(self, jacobian_node):
             continue
         else:
             node_grad_ori[node.name] = node.build_gradient_node(grad[node.name])
+            # if 'jacobian2' in prefix:
+            #     print(node)
+            #     print("START")
+            #     for i in range(len(node_grad_ori[node.name])):
+            #         print(node_grad_ori[node.name])
+            #     print("END")
+
             node_grad_ori[node.name] += [None] * (
                 len(node.inputs) - len(node_grad_ori[node.name]))
-
         logger.debug(f'Building gradient node for {node}')
         if not isinstance(node, BoundInput):
             for i in range(len(node.inputs)):
@@ -107,11 +123,18 @@ def expand_jacobian_node(self, jacobian_node):
                 degree[node.inputs[i].name] += 1
 
     if not input_node_found:
-        raise RuntimeError('Input node not found')
+        if not allow_unused:
+            raise RuntimeError('Input node not found')
+        zero_node = BoundJacobianZero(
+            attr=None, inputs=[output_node, input_node],
+            output_index=0, options=self.bound_opts)
+        zero_node.name = f'{prefix}{input_node.name}/jacobian_zero'
+        self.add_nodes([zero_node])
+        return zero_node
 
     # Second BFS pass: build the backward computational graph
     grad_node = {}
-    initial_name = f'/jacobian{output_node.name}{output_node.name}'
+    initial_name = f'{prefix}{output_node.name}'
     grad_node[output_node.name] = BoundJacobianInit(inputs=[output_node])
     grad_node[output_node.name].name = initial_name
     self.add_nodes([grad_node[output_node.name]])
@@ -120,8 +143,7 @@ def expand_jacobian_node(self, jacobian_node):
         node = queue.popleft()
 
         if node == input_node:
-            self.replace_node(jacobian_node, grad_node[node.name])
-            continue
+            return grad_node[node.name]
         if node.no_jacobian or not node.from_input:
             continue
 
@@ -133,21 +155,23 @@ def expand_jacobian_node(self, jacobian_node):
                 node_grad_ori[node.name][k][0],
                 tuple(item.detach()
                       for item in node_grad_ori[node.name][k][1]))
+            print("Node: ", node)
+            print(nodes_op)
             rename_dict = {}
             assert isinstance(nodes_in[0], BoundInput)
             rename_dict[nodes_in[0].name] = grad_node[node.name].name
             for i in range(1, len(nodes_in)):
                 # Assume it's a parameter here
-                new_name = f'/jacobian{output_node.name}{node.name}/{k}/params{nodes_in[i].name}'
+                new_name = f'{prefix}{node.name}/{k}/params{nodes_in[i].name}'
                 rename_dict[nodes_in[i].name] = new_name
             for i in range(len(nodes_op)):
                 # intermediate nodes
                 if not nodes_op[i].name in rename_dict:
-                    new_name = f'/jacobian{output_node.name}{node.name}/{k}/tmp{nodes_op[i].name}'
+                    new_name = f'{prefix}{node.name}/{k}/tmp{nodes_op[i].name}'
                     rename_dict[nodes_op[i].name] = new_name
             assert len(nodes_out) == 1
             nodes_out = nodes_out[0]
-            rename_dict[nodes_out.name] = f'/jacobian{output_node.name}{node.name}/{k}/output'
+            rename_dict[nodes_out.name] = f'{prefix}{node.name}/{k}/output'
 
             self.rename_nodes(nodes_op, nodes_in, rename_dict)
             input_nodes_replace = (
@@ -172,6 +196,8 @@ def expand_jacobian_node(self, jacobian_node):
             degree[node.inputs[k].name] -= 1
             if degree[node.inputs[k].name] == 0:
                 queue.append(node.inputs[k])
+
+    raise RuntimeError('Input node not found')
 
 
 def compute_jacobian_bounds(self: 'BoundedModule', x, optimize=True,

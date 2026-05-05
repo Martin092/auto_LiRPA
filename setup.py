@@ -26,7 +26,7 @@ with open('auto_LiRPA/__init__.py') as file:
             version = eval(line.strip().split()[-1])
 
 this_directory = Path(__file__).parent
-long_description = (this_directory / 'README.md').read_text()
+long_description = (this_directory / 'README.md').read_text(encoding='utf-8')
 
 print(f'Installing auto_LiRPA {version}')
 setup(

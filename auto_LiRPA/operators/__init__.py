@@ -39,6 +39,7 @@ from .cut_ops import *
 from .solver_utils import grb
 from .resize import *
 from .jacobian import *
+from .hessian import *
 from .indexing import *
 from .slice_concat import *
 from .reshape import *

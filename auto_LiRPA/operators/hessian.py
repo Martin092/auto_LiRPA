@@ -14,78 +14,60 @@
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
+"""Hessian marker operators."""
+
 import torch
-from torch.nn import Module
+
 from .base import Bound
 from ..utils import prod
 
 
-class JacobianOP(torch.autograd.Function):
+class HessianOP(torch.autograd.Function):
     @staticmethod
     def symbolic(g, output, input):
-        return g.op('grad::jacobian', output, input).setType(output.type())
+        return g.op('grad::hessian', output, input).setType(output.type())
 
     @staticmethod
     def forward(ctx, output, input):
         output_ = output.flatten(1)
-        return torch.zeros(
-            output.shape[0], output_.shape[-1], *input.shape[1:],
-            device=output.device)
-
-
-class BoundJacobianOP(Bound):
-    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
-        super().__init__(attr, inputs, output_index, options)
-
-    def forward(self, output, input):
-        return JacobianOP.apply(output, input)
-
-
-class BoundJacobianInit(Bound):
-    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
-        super().__init__(attr, inputs, output_index, options)
-        self.never_perturbed = True
-        self.no_jacobian = True
-
-    def forward(self, x):
-        dim = prod(x.shape[1:])
-        eye = torch.eye(
-            dim, dtype=x.dtype, device=x.device,
-            requires_grad=x.requires_grad)
-        eye = eye.unsqueeze(0).expand(
-            x.shape[0], -1, -1
-        ).view(x.shape[0], dim, *x.shape[1:])
-        return eye
-
-
-class BoundJacobianZero(Bound):
-    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
-        super().__init__(attr, inputs, output_index, options)
-        self.never_perturbed = True
-        self.no_jacobian = True
-
-    def forward(self, output, input):
-        output_ = output.flatten(1)
+        input_shape = tuple(input.shape[1:])
         return output.new_zeros(
-            output.shape[0], output_.shape[-1], *input.shape[1:])
+            output.shape[0], output_.shape[-1],
+            *input_shape, *input_shape)
+
+
+class BoundHessianOP(Bound):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+
+    def forward(self, output, input):
+        return HessianOP.apply(output, input)
+
+
+class BoundHessianOutputReshape(Bound):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        attr = {} if attr is None else attr
+        super().__init__(attr, inputs, output_index, options)
+        self.order = attr.get('order', 2)
+
+    def forward(self, derivative, output, input):
+        return _reshape_derivative_output(
+            derivative, output.shape[1:], input.shape[1:], self.order)
 
     def interval_propagate(self, *v):
-        zeros = self.forward(v[0][0], v[1][0])
-        return zeros, zeros
+        return (
+            _reshape_derivative_output(
+                v[0][0], v[1][0].shape[1:], v[2][0].shape[1:], self.order),
+            _reshape_derivative_output(
+                v[0][1], v[1][0].shape[1:], v[2][0].shape[1:], self.order))
 
 
-class GradNorm(Module):
-    def __init__(self, norm=1):
-        super().__init__()
-        self.norm = norm
-
-    def forward(self, grad):
-        grad = grad.view(grad.size(0), -1)
-        if self.norm == 1:
-            # torch.norm is not supported in auto_LiRPA yet
-            # use simpler operators for now
-            return grad.abs().sum(dim=-1, keepdim=True)
-        elif self.norm == 2:
-            return (grad * grad).sum(dim=-1)
-        else:
-            raise NotImplementedError(self.norm)
+def _reshape_derivative_output(derivative, output_shape, input_shape, order):
+    output_dim = prod(output_shape)
+    if order == 1:
+        return derivative.reshape(
+            derivative.shape[0], output_dim, *input_shape)
+    if order == 2:
+        return derivative.reshape(
+            derivative.shape[0], output_dim, *input_shape, *input_shape)
+    raise NotImplementedError(order)

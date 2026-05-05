@@ -34,6 +34,23 @@ class BoundSoftplus(BoundActivation):
     def forward(self, x):
         return self.softplus(x)
 
+    def build_gradient_node(self, grad_upstream):
+        grad_node = SoftplusGrad(
+            beta=self.softplus.beta, threshold=self.softplus.threshold)
+        grad_input = (grad_upstream, self.inputs[0].forward_value)
+        return [(grad_node, grad_input, [self.inputs[0]])]
+
+
+class SoftplusGrad(Module):
+    def __init__(self, beta=1.0, threshold=20.0):
+        super().__init__()
+        self.beta = beta
+        self.threshold = threshold
+
+    def forward(self, grad_last, preact):
+        grad = torch.sigmoid(self.beta * preact)
+        return grad_last * grad.unsqueeze(1)
+
 
 class BoundAbs(BoundActivation):
     def __init__(self, *args, **kwargs):

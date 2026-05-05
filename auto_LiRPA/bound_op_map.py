@@ -25,6 +25,7 @@ bound_op_map = {
     'grad::Slice': BoundSliceGrad,
     'grad::Sqr': BoundSqr,
     'grad::jacobian': BoundJacobianOP,
+    'grad::hessian': BoundHessianOP,
     'grad::Tanh': BoundTanhGrad,
     'grad::Sigmoid': BoundSigmoidGrad,
     'custom::Gelu': BoundGelu,
