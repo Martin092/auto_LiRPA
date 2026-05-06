@@ -155,8 +155,8 @@ def build_jacobian_graph(
                 node_grad_ori[node.name][k][0],
                 tuple(item.detach()
                       for item in node_grad_ori[node.name][k][1]))
-            print("Node: ", node)
-            print(nodes_op)
+            logger.debug(f'Converting node operators for: {node}')
+            logger.debug(f'Generated backwards ops: {nodes_op}')
             rename_dict = {}
             assert isinstance(nodes_in[0], BoundInput)
             rename_dict[nodes_in[0].name] = grad_node[node.name].name

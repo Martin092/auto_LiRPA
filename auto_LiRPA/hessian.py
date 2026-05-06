@@ -23,6 +23,7 @@ import torch
 from auto_LiRPA.bound_ops import (
     BoundHessianOP, BoundHessianOutputReshape, HessianOP)
 from auto_LiRPA.jacobian import build_jacobian_graph
+from auto_LiRPA.utils import logger
 
 
 def compute_hessian_bounds(
@@ -63,8 +64,7 @@ def expand_hessian_node(self, hessian_node):
         prefix=f'{prefix}/jacobian1', allow_unused=True)
     # The second Jacobian expansion needs shapes for the first Jacobian graph.
     self.forward(*self.global_input, final_node_name=jacobian_node.name)
-    print("**********")
-    print("**********")
+    logger.debug('Hessian Jacobian expansion checkpoint')
     jacobian_of_jacobian_node = build_jacobian_graph(
         self, jacobian_node, input_node,
         prefix=f'{prefix}/jacobian2', allow_unused=True)
