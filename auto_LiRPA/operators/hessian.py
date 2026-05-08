@@ -45,29 +45,45 @@ class BoundHessianOP(Bound):
 
 
 class BoundHessianOutputReshape(Bound):
-    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
-        attr = {} if attr is None else attr
-        super().__init__(attr, inputs, output_index, options)
-        self.order = attr.get('order', 2)
+    def forward(self, jacobian_of_jacobian, output_node_value, input_node_value):
+        # Incoming jacobian_of_jacobian shape: (Batch, Out * In, In)
+        # Outcoming shape:                     (Batch, Out, In, In)
+        batch_size = jacobian_of_jacobian.shape[0]
+        output_shape = output_node_value.shape[1:]
+        input_shape = input_node_value.shape[1:]
 
-    def forward(self, derivative, output, input):
-        return _reshape_derivative_output(
-            derivative, output.shape[1:], input.shape[1:], self.order)
+        return jacobian_of_jacobian.reshape(batch_size, *output_shape, *input_shape, *input_shape)
 
-    def interval_propagate(self, *v):
-        return (
-            _reshape_derivative_output(
-                v[0][0], v[1][0].shape[1:], v[2][0].shape[1:], self.order),
-            _reshape_derivative_output(
-                v[0][1], v[1][0].shape[1:], v[2][0].shape[1:], self.order))
+    def interval_propagate(self, *node_inputs):
+        lower_hessian_bound, upper_hessian_bound = node_inputs[0]
+        output_node_bounds = node_inputs[1]
+        input_node_bounds = node_inputs[2]
+        
+        reshaped_lower_bound = None
+        if lower_hessian_bound is not None:
+            reshaped_lower_bound = self.forward(lower_hessian_bound, output_node_bounds[0], input_node_bounds[0])
+            
+        reshaped_upper_bound = None
+        if upper_hessian_bound is not None:
+            reshaped_upper_bound = self.forward(upper_hessian_bound, output_node_bounds[0], input_node_bounds[0])
+        
+        return reshaped_lower_bound, reshaped_upper_bound
 
+    def bound_backward(self, lower_A_matrix, upper_A_matrix, *node_inputs, **kwargs):
+        # Incoming A matrix shape:  (Specification, Batch, Out, In, In)
+        # Outcoming A matrix shape: (Specification, Batch, Out * In, In)
+        input_node = node_inputs[2]
+        input_shape = input_node.forward_value.shape[1:]
 
-def _reshape_derivative_output(derivative, output_shape, input_shape, order):
-    output_dim = prod(output_shape)
-    if order == 1:
-        return derivative.reshape(
-            derivative.shape[0], output_dim, *input_shape)
-    if order == 2:
-        return derivative.reshape(
-            derivative.shape[0], output_dim, *input_shape, *input_shape)
-    raise NotImplementedError(order)
+        def unreshape_coefficient_matrix(coefficient_matrix):
+            if coefficient_matrix is None: 
+                return None
+            
+            # The -1 squishes the Output and first Input dimensions together
+            return coefficient_matrix.reshape(coefficient_matrix.shape[0], coefficient_matrix.shape[1], -1, *input_shape)
+
+        return [
+            (unreshape_coefficient_matrix(lower_A_matrix), unreshape_coefficient_matrix(upper_A_matrix)), 
+            (None, None), 
+            (None, None)
+        ], 0.0, 0.0

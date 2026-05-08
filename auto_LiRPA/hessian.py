@@ -31,15 +31,16 @@ def compute_hessian_bounds(
     x,
     bound_lower: bool = True,
     bound_upper: bool = True,
+    method: str = 'IBP',
 ):
-    """Compute IBP bounds for a Hessian graph expanded from ``HessianOP``."""
+    """Compute IBP or backward bound propagation bounds for a Hessian graph expanded from ``HessianOP``."""
 
     if isinstance(x, torch.Tensor):
         x = (x,)
     if not getattr(self, 'hessian_node_pairs', None):
         raise RuntimeError('No Hessian nodes found in this BoundedModule')
     return self.compute_bounds(
-        method='IBP', x=x,
+        method=method, x=x,
         bound_lower=bound_lower, bound_upper=bound_upper)
 
 

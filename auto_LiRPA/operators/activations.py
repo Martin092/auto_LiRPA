@@ -33,7 +33,26 @@ class BoundSoftplus(BoundActivation):
 
     def forward(self, x):
         return self.softplus(x)
+    
+    def bound_relax(self, x, init=False):
+        if init:
+            self.init_linear_relaxation(x)
 
+        pre_activation_lower, pre_activation_upper = x.lower, x.upper
+        post_activation_lower, post_activation_upper = self.forward(pre_activation_lower), self.forward(pre_activation_upper)
+        
+        # Softplus is strictly convex.
+        # The upper bound is the secant line connecting the endpoints of the interval.
+        secant_slope = (post_activation_upper - post_activation_lower) / (pre_activation_upper - pre_activation_lower).clamp(min=1e-8)
+        
+        # The lower bound is the tangent line. We choose the tangent at the interval midpoint for simplicity.
+        midpoint = (pre_activation_lower + pre_activation_upper) / 2.0
+        midpoint_post_activation = self.forward(midpoint)
+        tangent_slope = torch.sigmoid(midpoint) 
+        
+        self.add_linear_relaxation(mask=None, type='upper', k=secant_slope, x0=pre_activation_lower, y0=post_activation_lower)
+        self.add_linear_relaxation(mask=None, type='lower', k=tangent_slope, x0=midpoint, y0=midpoint_post_activation)
+        
     def build_gradient_node(self, grad_upstream):
         grad_node = SoftplusGrad(
             beta=self.softplus.beta, threshold=self.softplus.threshold)
