@@ -19,7 +19,7 @@ import torch
 from torch.nn import Module
 from torch.autograd import Function
 from .base import *
-from .activation_base import BoundOptimizableActivation
+from .activation_base import BoundActivation, BoundOptimizableActivation
 
 
 class BoundSShaped(BoundOptimizableActivation):
@@ -743,6 +743,10 @@ def d2tanh(x):
 def d2sigmoid(x):
     return dsigmoid(x) * (1 - 2 * torch.sigmoid(x))
 
+def d3sigmoid(x):
+    sigmoid_x = torch.sigmoid(x)
+    return dsigmoid(x) * (1 - 6 * sigmoid_x + 6 * sigmoid_x.pow(2))
+
 
 class BoundTanh(BoundSShaped):
     """
@@ -1039,6 +1043,190 @@ class SigmoidGrad(Module):
         return g * SigmoidGradOp.apply(preact).unsqueeze(1)
 
 
+class SigmoidSecondGradOp(Function):
+    @staticmethod
+    def symbolic(_, preact):
+        return _.op('grad::SigmoidSecondGrad', preact).setType(preact.type())
+
+    @staticmethod
+    def forward(ctx, preact):
+        return d2sigmoid(preact)
+
+
+class SigmoidSecondGrad(Module):
+    def forward(self, g, preact):
+        return g * SigmoidSecondGradOp.apply(preact).unsqueeze(1)
+
+
+class BoundSigmoidSecondGrad(BoundActivation):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+        self.requires_input_bounds = [0]
+        self.ibp_intermediate = True
+        self.extreme_point = 1.3169578969248166
+        self.outer_inflection_point = 2.2924316695611777
+
+    def forward(self, x):
+        return d2sigmoid(x)
+
+    def _add_increasing_s_shape_relaxation(
+            self, mask, lower, upper, func, dfunc, inflection_point,
+            left_limit=None, right_limit=None, negate=False):
+        """Add relaxations for an increasing S-shaped segment.
+
+        If ``negate`` is True, ``func`` is the negated target function. A lower
+        bound on ``func`` becomes an upper bound on the original function, and
+        vice versa.
+        """
+        if not mask.any():
+            return
+
+        def add_line(line_type, line_mask, k, x0, y0):
+            if negate:
+                line_type = 'upper' if line_type == 'lower' else 'lower'
+                k, y0 = -k, -y0
+            self.add_linear_relaxation(
+                mask=line_mask, type=line_type, k=k, x0=x0, y0=y0)
+
+        center = lower.new_tensor(inflection_point)
+        y_l, y_u = func(lower), func(upper)
+        k_direct = (y_u - y_l) / (upper - lower).clamp(min=1e-8)
+        midpoint = (lower + upper) / 2
+        y_midpoint = func(midpoint)
+        k_midpoint = dfunc(midpoint)
+
+        mask_left = torch.logical_and(mask, upper <= center)
+        mask_right = torch.logical_and(mask, lower >= center)
+        mask_cross = torch.logical_and(
+            mask, torch.logical_and(lower < center, upper > center))
+
+        # Convex side: tangent lower, secant upper.
+        add_line('lower', mask_left, k_midpoint, midpoint, y_midpoint)
+        add_line('upper', mask_left, k_direct, lower, y_l)
+        # Concave side: secant lower, tangent upper.
+        add_line('lower', mask_right, k_direct, lower, y_l)
+        add_line('upper', mask_right, k_midpoint, midpoint, y_midpoint)
+
+        if not mask_cross.any():
+            return
+
+        mask_direct_lower = torch.logical_and(
+            mask_cross, k_direct < dfunc(lower))
+        mask_direct_upper = torch.logical_and(
+            mask_cross, k_direct < dfunc(upper))
+
+        d_lower = self._find_lower_tangent_point(
+            lower, upper, func, dfunc, inflection_point, left_limit)
+        d_upper = self._find_upper_tangent_point(
+            lower, upper, func, dfunc, inflection_point, right_limit)
+
+        add_line('lower', mask_direct_lower, k_direct, lower, y_l)
+        add_line(
+            'lower',
+            torch.logical_and(mask_cross, torch.logical_not(mask_direct_lower)),
+            dfunc(d_lower), d_lower, func(d_lower))
+        add_line('upper', mask_direct_upper, k_direct, lower, y_l)
+        add_line(
+            'upper',
+            torch.logical_and(mask_cross, torch.logical_not(mask_direct_upper)),
+            dfunc(d_upper), d_upper, func(d_upper))
+
+    def _find_lower_tangent_point(
+            self, lower, upper, func, dfunc, inflection_point, left_limit):
+        center = lower.new_tensor(inflection_point)
+        high = center.expand_as(lower)
+        if left_limit is None:
+            low = torch.minimum(lower, center - 1.)
+            for _ in range(20):
+                checked = (
+                    dfunc(low) * (upper - low) + func(low) <= func(upper))
+                if checked.all():
+                    break
+                low = torch.where(checked, low, center + 2 * (low - center))
+        else:
+            low = lower.new_full(lower.shape, left_limit)
+
+        for _ in range(50):
+            mid = (low + high) / 2
+            checked = (
+                dfunc(mid) * (upper - mid) + func(mid) <= func(upper))
+            low = torch.where(checked, mid, low)
+            high = torch.where(checked, high, mid)
+        return low
+
+    def _find_upper_tangent_point(
+            self, lower, upper, func, dfunc, inflection_point, right_limit):
+        center = lower.new_tensor(inflection_point)
+        low = center.expand_as(lower)
+        if right_limit is None:
+            high = torch.maximum(upper, center + 1.)
+            for _ in range(20):
+                checked = (
+                    dfunc(high) * (lower - high) + func(high) >= func(lower))
+                if checked.all():
+                    break
+                high = torch.where(checked, high, center + 2 * (high - center))
+        else:
+            high = lower.new_full(lower.shape, right_limit)
+
+        for _ in range(50):
+            mid = (low + high) / 2
+            checked = (
+                dfunc(mid) * (lower - mid) + func(mid) >= func(lower))
+            high = torch.where(checked, mid, high)
+            low = torch.where(checked, low, mid)
+        return high
+
+    def _interval_bounds(self, lower, upper):
+        lower_value = self.forward(lower)
+        upper_value = self.forward(upper)
+        bound_lower = torch.min(lower_value, upper_value)
+        bound_upper = torch.max(lower_value, upper_value)
+
+        for point in [
+                lower.new_tensor(-self.extreme_point),
+                lower.new_tensor(self.extreme_point)]:
+            value = self.forward(point).expand_as(bound_lower)
+            mask = torch.logical_and(lower <= point, upper >= point)
+            bound_lower = torch.where(mask, torch.min(bound_lower, value), bound_lower)
+            bound_upper = torch.where(mask, torch.max(bound_upper, value), bound_upper)
+
+        return bound_lower, bound_upper
+
+    def interval_propagate(self, *v):
+        return self._interval_bounds(v[0][0], v[0][1])
+
+    def bound_relax(self, x, init=False):
+        if init:
+            self.init_linear_relaxation(x)
+        lower, upper = x.lower, x.upper
+        interval_lower, interval_upper = self._interval_bounds(lower, upper)
+        self.add_linear_relaxation(
+            mask=None, type='lower', k=0., x0=0., y0=interval_lower)
+        self.add_linear_relaxation(
+            mask=None, type='upper', k=0., x0=0., y0=interval_upper)
+
+        extreme = lower.new_tensor(self.extreme_point)
+
+        left_segment = upper <= -extreme
+        middle_segment = torch.logical_and(lower >= -extreme, upper <= extreme)
+        right_segment = lower >= extreme
+
+        self._add_increasing_s_shape_relaxation(
+            left_segment, lower, upper, self.forward, d3sigmoid,
+            -self.outer_inflection_point, left_limit=None,
+            right_limit=-self.extreme_point)
+        self._add_increasing_s_shape_relaxation(
+            middle_segment, lower, upper,
+            lambda z: -self.forward(z), lambda z: -d3sigmoid(z),
+            0., left_limit=-self.extreme_point, right_limit=self.extreme_point,
+            negate=True)
+        self._add_increasing_s_shape_relaxation(
+            right_segment, lower, upper, self.forward, d3sigmoid,
+            self.outer_inflection_point, left_limit=self.extreme_point,
+            right_limit=None)
+
+
 class BoundSigmoidGrad(BoundTanhGrad):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None,
                  activation=('sigmoid', dsigmoid, d2sigmoid), precompute=True):
@@ -1046,6 +1234,12 @@ class BoundSigmoidGrad(BoundTanhGrad):
         self.inflection_point = 1.3169614
         if precompute:
             self.precompute_relaxation()
+
+    def build_gradient_node(self, grad_upstream):
+        node_grad = SigmoidSecondGrad()
+        grad_input = (grad_upstream, self.inputs[0].forward_value)
+        grad_extra_nodes = [self.inputs[0]]
+        return [(node_grad, grad_input, grad_extra_nodes)]
 
 
 class BoundAtan(BoundTanh):

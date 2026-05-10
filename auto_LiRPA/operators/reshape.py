@@ -98,7 +98,7 @@ class BoundReshape(Bound):
         self.solver_vars = gvar_array.tolist()
 
     def build_gradient_node(self, grad_upstream):
-        node_grad = ReshapeGrad()
+        node_grad = ReshapeGrad(has_spec_dim=True)
         grad_input = (grad_upstream, self.inputs[0].forward_value)
         return [(node_grad, grad_input, [])]
 
@@ -325,7 +325,7 @@ class BoundFlatten(Bound):
         model.update()
 
     def build_gradient_node(self, grad_upstream):
-        node_grad = ReshapeGrad()
+        node_grad = ReshapeGrad(has_spec_dim=True)
         grad_input = (grad_upstream, self.inputs[0].forward_value)
         return [(node_grad, grad_input, [])]
 
@@ -364,8 +364,12 @@ class BoundATenUnflatten(BoundReshape):
 
 
 class ReshapeGrad(Module):
+    def __init__(self, has_spec_dim=False):
+        super().__init__()
+        self.has_spec_dim = has_spec_dim
+
     def forward(self, grad_last, inp):
-        if grad_last.numel() == inp.numel():
+        if not self.has_spec_dim:
             return grad_last.reshape(grad_last.shape[0], *inp.shape[1:])
         else:
             return grad_last.reshape(*grad_last.shape[:2], *inp.shape[1:])

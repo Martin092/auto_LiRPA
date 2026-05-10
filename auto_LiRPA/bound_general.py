@@ -1446,7 +1446,8 @@ class BoundedModule(nn.Module):
                     ibp_lower, ibp_upper = self.IBP_general(node,
                         delete_bounds_after_use=True)
                     dim_output = int(prod(node.output_shape[1:]))
-                    C = torch.eye(dim_output, device=self.device).expand(
+                    C = torch.eye(dim_output, device=self.device,
+                                  dtype=self.get_forward_value(node).dtype).expand(
                         self.batch_size, dim_output, dim_output)
                     crown_lower, crown_upper = self.backward_general(node, C=C)
                     save_dict[node.name] = (
@@ -1495,7 +1496,8 @@ class BoundedModule(nn.Module):
                     f'C is not missing while node {final} has no default shape')
             dim_output = int(prod(final.output_shape[1:]))
             # TODO: use an eyeC object here.
-            C = torch.eye(dim_output, device=self.device).expand(
+            C = torch.eye(dim_output, device=self.device,
+                          dtype=self.get_forward_value(final).dtype).expand(
                 self.batch_size, dim_output, dim_output)
 
         # Reuse previously saved alpha values,

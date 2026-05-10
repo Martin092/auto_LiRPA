@@ -598,7 +598,9 @@ def get_sparse_C(self: 'BoundedModule', node, ref_intermediate):
             if dim > crown_batch_size:
                 newC = BatchedCrownC('eye')
             else:
-                newC = torch.eye(dim, device=self.device).unsqueeze(0).expand(
+                newC = torch.eye(
+                    dim, device=self.device,
+                    dtype=self.get_forward_value(node).dtype).unsqueeze(0).expand(
                     batch_size, -1, -1
                 ).view(batch_size, dim, *node.output_shape[1:])
 

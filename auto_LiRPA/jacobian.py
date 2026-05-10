@@ -115,8 +115,25 @@ def build_jacobian_graph(
             for i in range(len(node.inputs)):
                 if node_grad_ori[node.name][i] is None:
                     continue
-                grad[node.inputs[i].name] = node_grad_ori[
-                    node.name][i][0](*node_grad_ori[node.name][i][1])
+                entry = node_grad_ori[node.name][i]
+                grad_module, grad_args, deps = entry
+
+                # def describe_arg(arg):
+                #     if hasattr(arg, "shape"):
+                #         return tuple(arg.shape)
+                #     return repr(arg)
+                #
+                # print(
+                #     "Node:", node,
+                #     "i:", i,
+                #     "target:", node.inputs[i].name,
+                #     "grad_module:", type(grad_module).__name__,
+                #     "arg_shapes:", [describe_arg(arg) for arg in grad_args],
+                #     "deps:", [dep.name for dep in deps],
+                #     "input_shape:", getattr(grad_module, "input_shape", None),
+                # )
+
+                grad[node.inputs[i].name] = grad_module(*grad_args)
                 if not node.inputs[i].name in degree:
                     degree[node.inputs[i].name] = 0
                     queue.append(node.inputs[i])

@@ -71,12 +71,13 @@ class BoundActivation(Bound):
         else:
             b = -x0 * k + y0
             if mask is None:
-                if b.ndim > 0:
-                    b_out[:] = b
+                if isinstance(b, Tensor) and b.ndim > 0:
+                    b_out[:] = b.to(b_out)
                 else:
                     b_out.fill_(b)
             else:
-                b_out[..., mask] = b[..., mask]
+                b_out[..., mask] = (b[..., mask].to(b_out) if isinstance(b, Tensor)
+                                    else b)
 
     def bound_relax(self, x, init=False):
         return not_implemented_op(self, 'bound_relax')
