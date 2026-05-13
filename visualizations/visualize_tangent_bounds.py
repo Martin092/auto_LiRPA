@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from auto_LiRPA.operators.s_shaped import BoundSigmoidSecondGrad, d2sigmoid, d3sigmoid
 
+folder_name = "NAME"
+
 
 class BoundSigmoidSecondGradVisualizer(BoundSigmoidSecondGrad):
 
@@ -225,17 +227,17 @@ def save_all_plots():
     print("Generating visualization plots...")
     
     import os
-    os.makedirs('visualizations_opt', exist_ok=True)
+    os.makedirs('optimal', exist_ok=True)
     
     print("  - Creating comparison plot...")
     fig1 = create_comparison_plot()
-    fig1.savefig('./visualizations/tangent_bounds_comparison.png', dpi=150, bbox_inches='tight')
-    print("    Saved: visualizations/tangent_bounds_comparison.png")
+    fig1.savefig(f'./{folder_name}/tangent_bounds_comparison.png', dpi=150, bbox_inches='tight')
+    print(f"    Saved: {folder_name}/tangent_bounds_comparison.png")
     
     print("  - Creating bound envelope plot...")
     fig2 = create_bound_envelope_plot()
-    fig2.savefig('./visualizations/bound_envelope.png', dpi=150, bbox_inches='tight')
-    print("    Saved: visualizations/bound_envelope.png")
+    fig2.savefig(f'./{folder_name}/bound_envelope.png', dpi=150, bbox_inches='tight')
+    print(f"    Saved: {folder_name}/bound_envelope.png")
     
     print("\nAll visualizations saved to ./visualizations/")
     print("\nYou can view the plots interactively by running:")
@@ -256,11 +258,11 @@ def show_interactive():
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Visualize tangent-based bounds')
-    parser.add_argument('--save', action='store_true', help='Save plots to ./visualizations/')
+    parser.add_argument('--save', action='store_true', help=f'Save plots to ./{folder_name}/')
     parser.add_argument('--show', action='store_true', help='Show interactive plots')
     args = parser.parse_args()
 
-    Path("").mkdir(exist_ok=True)
+    Path(folder_name).mkdir(exist_ok=True)
     
     if args.save or (not args.save and not args.show):
         save_all_plots()
