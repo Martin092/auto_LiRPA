@@ -1069,113 +1069,8 @@ class BoundSigmoidSecondGrad(BoundActivation):
     def forward(self, x):
         return d2sigmoid(x)
 
-    def _add_increasing_s_shape_relaxation(
-            self, mask, lower, upper, func, dfunc, inflection_point,
-            left_limit=None, right_limit=None, negate=False):
-        """Add relaxations for an increasing S-shaped segment.
-
-        If ``negate`` is True, ``func`` is the negated target function. A lower
-        bound on ``func`` becomes an upper bound on the original function, and
-        vice versa.
-        """
-        if not mask.any():
-            return
-
-        def add_line(line_type, line_mask, k, x0, y0):
-            if negate:
-                line_type = 'upper' if line_type == 'lower' else 'lower'
-                k, y0 = -k, -y0
-            self.add_linear_relaxation(
-                mask=line_mask, type=line_type, k=k, x0=x0, y0=y0)
-
-        center = lower.new_tensor(inflection_point)
-        y_l, y_u = func(lower), func(upper)
-        k_direct = (y_u - y_l) / (upper - lower).clamp(min=1e-8)
-        midpoint = (lower + upper) / 2
-        y_midpoint = func(midpoint)
-        k_midpoint = dfunc(midpoint)
-
-        mask_left = torch.logical_and(mask, upper <= center)
-        mask_right = torch.logical_and(mask, lower >= center)
-        mask_cross = torch.logical_and(
-            mask, torch.logical_and(lower < center, upper > center))
-
-        # Convex side: tangent lower, secant upper.
-        add_line('lower', mask_left, k_midpoint, midpoint, y_midpoint)
-        add_line('upper', mask_left, k_direct, lower, y_l)
-        # Concave side: secant lower, tangent upper.
-        add_line('lower', mask_right, k_direct, lower, y_l)
-        add_line('upper', mask_right, k_midpoint, midpoint, y_midpoint)
-
-        if not mask_cross.any():
-            return
-
-        mask_direct_lower = torch.logical_and(
-            mask_cross, k_direct < dfunc(lower))
-        mask_direct_upper = torch.logical_and(
-            mask_cross, k_direct < dfunc(upper))
-
-        d_lower = self._find_lower_tangent_point(
-            lower, upper, func, dfunc, inflection_point, left_limit)
-        d_upper = self._find_upper_tangent_point(
-            lower, upper, func, dfunc, inflection_point, right_limit)
-
-        add_line('lower', mask_direct_lower, k_direct, lower, y_l)
-        add_line(
-            'lower',
-            torch.logical_and(mask_cross, torch.logical_not(mask_direct_lower)),
-            dfunc(d_lower), d_lower, func(d_lower))
-        add_line('upper', mask_direct_upper, k_direct, lower, y_l)
-        add_line(
-            'upper',
-            torch.logical_and(mask_cross, torch.logical_not(mask_direct_upper)),
-            dfunc(d_upper), d_upper, func(d_upper))
-
-    def _find_lower_tangent_point(
-            self, lower, upper, func, dfunc, inflection_point, left_limit):
-        center = lower.new_tensor(inflection_point)
-        high = center.expand_as(lower)
-        if left_limit is None:
-            low = torch.minimum(lower, center - 1.)
-            for _ in range(20):
-                checked = (
-                    dfunc(low) * (upper - low) + func(low) <= func(upper))
-                if checked.all():
-                    break
-                low = torch.where(checked, low, center + 2 * (low - center))
-        else:
-            low = lower.new_full(lower.shape, left_limit)
-
-        for _ in range(50):
-            mid = (low + high) / 2
-            checked = (
-                dfunc(mid) * (upper - mid) + func(mid) <= func(upper))
-            low = torch.where(checked, mid, low)
-            high = torch.where(checked, high, mid)
-        return low
-
-    def _find_upper_tangent_point(
-            self, lower, upper, func, dfunc, inflection_point, right_limit):
-        center = lower.new_tensor(inflection_point)
-        low = center.expand_as(lower)
-        if right_limit is None:
-            high = torch.maximum(upper, center + 1.)
-            for _ in range(20):
-                checked = (
-                    dfunc(high) * (lower - high) + func(high) >= func(lower))
-                if checked.all():
-                    break
-                high = torch.where(checked, high, center + 2 * (high - center))
-        else:
-            high = lower.new_full(lower.shape, right_limit)
-
-        for _ in range(50):
-            mid = (low + high) / 2
-            checked = (
-                dfunc(mid) * (lower - mid) + func(mid) >= func(lower))
-            high = torch.where(checked, mid, high)
-            low = torch.where(checked, low, mid)
-        return high
+    def interval_propagate(self, *v):
+        return self._interval_bounds(v[0][0], v[0][1])
 
     def _interval_bounds(self, lower, upper):
         lower_value = self.forward(lower)
@@ -1193,9 +1088,6 @@ class BoundSigmoidSecondGrad(BoundActivation):
 
         return bound_lower, bound_upper
 
-    def interval_propagate(self, *v):
-        return self._interval_bounds(v[0][0], v[0][1])
-
     def bound_relax(self, x, init=False):
         if init:
             self.init_linear_relaxation(x)
@@ -1206,25 +1098,166 @@ class BoundSigmoidSecondGrad(BoundActivation):
         self.add_linear_relaxation(
             mask=None, type='upper', k=0., x0=0., y0=interval_upper)
 
-        extreme = lower.new_tensor(self.extreme_point)
+        lower_k, lower_x0, upper_k, upper_x0 = self._find_bounds_with_tangents(
+            lower, upper)
 
-        left_segment = upper <= -extreme
-        middle_segment = torch.logical_and(lower >= -extreme, upper <= extreme)
-        right_segment = lower >= extreme
+        self.add_linear_relaxation(
+            mask=None, type='lower', k=lower_k, x0=lower_x0,
+            y0=self.forward(lower_x0))
+        self.add_linear_relaxation(
+            mask=None, type='upper', k=upper_k, x0=upper_x0,
+            y0=self.forward(upper_x0))
 
-        self._add_increasing_s_shape_relaxation(
-            left_segment, lower, upper, self.forward, d3sigmoid,
-            -self.outer_inflection_point, left_limit=None,
-            right_limit=-self.extreme_point)
-        self._add_increasing_s_shape_relaxation(
-            middle_segment, lower, upper,
-            lambda z: -self.forward(z), lambda z: -d3sigmoid(z),
-            0., left_limit=-self.extreme_point, right_limit=self.extreme_point,
-            negate=True)
-        self._add_increasing_s_shape_relaxation(
-            right_segment, lower, upper, self.forward, d3sigmoid,
-            self.outer_inflection_point, left_limit=self.extreme_point,
-            right_limit=None)
+    def _find_bounds_with_tangents(self, lower, upper):
+        y_l = self.forward(lower)
+        y_u = self.forward(upper)
+        secant_slope = (y_u - y_l) / (upper - lower).clamp(min=1e-8)
+
+        roots = self._solve_tangent_points(secant_slope, lower, upper)
+        inside = torch.isfinite(roots) & (roots > lower.unsqueeze(-1) + 1e-6) & (roots < upper.unsqueeze(-1) - 1e-6)
+        tangent_count = inside.sum(dim=-1)
+        has_two_tangents = tangent_count >= 2
+        has_one_tangent = tangent_count == 1
+
+        left_tangent = torch.where(
+            inside, roots, torch.full_like(roots, float('inf'))).amin(dim=-1)
+        right_tangent = torch.where(
+            inside, roots, torch.full_like(roots, float('-inf'))).amax(dim=-1)
+
+        def eval_tangent_line(k, x0, x_eval):
+            return k * (x_eval - x0) + self.forward(x0)
+
+        lower_k = secant_slope.clone()
+        lower_x0 = lower.clone()
+        upper_k = secant_slope.clone()
+        upper_x0 = lower.clone()
+
+        if has_two_tangents.any():
+            mask = has_two_tangents
+            midpoint = (lower[mask] + upper[mask]) / 2.0
+            left_line_mid = eval_tangent_line(secant_slope[mask], left_tangent[mask], midpoint)
+            right_line_mid = eval_tangent_line(secant_slope[mask], right_tangent[mask], midpoint)
+            left_is_upper = left_line_mid >= right_line_mid
+
+            upper_k[mask] = secant_slope[mask]
+            lower_k[mask] = secant_slope[mask]
+            upper_x0[mask] = torch.where(left_is_upper, left_tangent[mask], right_tangent[mask])
+            lower_x0[mask] = torch.where(left_is_upper, right_tangent[mask], left_tangent[mask])
+
+        if has_one_tangent.any():
+            mask = has_one_tangent
+            midpoint = (lower[mask] + upper[mask]) / 2.0
+
+            y_left_at_mid = eval_tangent_line(secant_slope[mask], left_tangent[mask], midpoint)
+            y_secant_at_mid = secant_slope[mask] * (midpoint - upper[mask]) + y_u[mask]
+
+            is_upper = y_left_at_mid > y_secant_at_mid
+
+            upper_k[mask] = secant_slope[mask]
+            lower_k[mask] = secant_slope[mask]
+            upper_x0[mask] = torch.where(is_upper, left_tangent[mask], upper[mask])
+            lower_x0[mask] = torch.where(is_upper, upper[mask], left_tangent[mask])
+
+        # optimized_lower_x0, lower_valid = self._optimize_tangent_point(
+        #     lower, upper, lower_x0, is_lower=True)
+        # optimized_upper_x0, upper_valid = self._optimize_tangent_point(
+        #     lower, upper, upper_x0, is_lower=False)
+        #
+        # lower_k = torch.where(lower_valid, d3sigmoid(optimized_lower_x0), lower_k)
+        # upper_k = torch.where(upper_valid, d3sigmoid(optimized_upper_x0), upper_k)
+        # lower_x0 = torch.where(lower_valid, optimized_lower_x0, lower_x0)
+        # upper_x0 = torch.where(upper_valid, optimized_upper_x0, upper_x0)
+
+        return lower_k, lower_x0, upper_k, upper_x0
+
+    def _solve_tangent_points(self, slope, lower, upper):
+        slope = torch.as_tensor(slope, device=lower.device, dtype=lower.dtype)
+        disc = (1.0 - 24.0 * slope).clamp(min=0.0)
+
+        w_small = ((2.0 - torch.sqrt(disc)) / 3.0).clamp(min=0.0)
+        w_large = ((2.0 + torch.sqrt(disc)) / 3.0).clamp(min=0.0)
+
+        x_small = 2.0 * torch.atanh(torch.sqrt(w_small.clamp(max=1.0)))
+        x_large = 2.0 * torch.atanh(torch.sqrt(w_large.clamp(max=1.0)))
+
+        valid_small = (w_small <= 1.0) & torch.isfinite(x_small)
+        valid_large = (w_large <= 1.0) & torch.isfinite(x_large)
+
+        roots = torch.stack([
+            torch.where(valid_large, -x_large, torch.full_like(x_large, float('nan'))),
+            torch.where(valid_small, -x_small, torch.full_like(x_small, float('nan'))),
+            torch.where(valid_small,  x_small, torch.full_like(x_small, float('nan'))),
+            torch.where(valid_large,  x_large, torch.full_like(x_large, float('nan'))),
+        ], dim=-1)
+
+        return roots
+
+    def _optimize_tangent_point(
+            self, lower, upper, baseline_x0, is_lower,
+            num_steps=6, num_candidates=9):
+
+        width = (upper - lower).clamp(min=1e-8)
+        radius = 0.5 * width
+        low = torch.maximum(lower, baseline_x0 - radius)
+        high = torch.minimum(upper, baseline_x0 + radius)
+        invalid_window = high <= low
+        high = torch.where(invalid_window, low + 1e-6, high)
+
+        grid_t = torch.linspace(0., 1., 129, device=lower.device, dtype=lower.dtype)
+        grid_t = grid_t.view((grid_t.numel(), 1) + (1,) * lower.ndim)
+
+        def evaluate(candidates):
+            x = lower.unsqueeze(0).unsqueeze(1) + grid_t * width.unsqueeze(0).unsqueeze(1)
+            k = d3sigmoid(candidates)
+            y0 = self.forward(candidates)
+            line = k.unsqueeze(0) * (x - candidates.unsqueeze(0)) + y0.unsqueeze(0)
+            y = self.forward(x)
+
+            if is_lower:
+                violation = torch.relu(line - y)
+                gap = (y - line).clamp(min=0)
+            else:
+                violation = torch.relu(y - line)
+                gap = (line - y).clamp(min=0)
+
+            area = torch.trapz(gap, x, dim=0)
+            valid = violation.max(dim=0).values <= 1e-6
+            objective = torch.where(valid, area, torch.full_like(area, float('inf')))
+            return objective, valid
+
+        weights = torch.linspace(
+            0., 1., num_candidates, device=lower.device, dtype=lower.dtype)
+        weights = weights.view((num_candidates,) + (1,) * lower.ndim)
+
+        def select(values, indices):
+            return torch.take_along_dim(values, indices.unsqueeze(0), dim=0).squeeze(0)
+
+        best = baseline_x0
+        best_valid = torch.zeros_like(lower, dtype=torch.bool)
+
+        for _ in range(num_steps):
+            candidates = low.unsqueeze(0) + weights * (high - low).unsqueeze(0)
+            candidates = torch.cat([candidates, baseline_x0.unsqueeze(0)], dim=0)
+
+            objective, valid = evaluate(candidates)
+            best_idx = objective.argmin(dim=0)
+            best_obj = objective.min(dim=0).values
+            has_valid = torch.isfinite(best_obj)
+            chosen = select(candidates, best_idx)
+            best = torch.where(has_valid, chosen, best)
+            best_valid = torch.logical_or(best_valid, has_valid)
+
+            left_idx = torch.clamp(best_idx - 1, min=0, max=candidates.shape[0] - 1)
+            right_idx = torch.clamp(best_idx + 1, min=0, max=candidates.shape[0] - 1)
+            left = select(candidates, left_idx)
+            right = select(candidates, right_idx)
+            new_low = torch.minimum(left, right)
+            new_high = torch.maximum(left, right)
+
+            low = torch.where(has_valid, new_low, low)
+            high = torch.where(has_valid, new_high, high)
+
+        return best, best_valid
 
 
 class BoundSigmoidGrad(BoundTanhGrad):
