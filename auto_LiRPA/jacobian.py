@@ -55,7 +55,7 @@ def _expand_jacobian(self):
 
 
 def expand_jacobian_node(self, jacobian_node):
-    logger.info(f'Expanding Jacobian node {jacobian_node}')
+    logger.debug(f'Expanding Jacobian node {jacobian_node}')
 
     output_node = jacobian_node.inputs[0]
     input_node = jacobian_node.inputs[1]
@@ -219,11 +219,36 @@ def build_jacobian_graph(
 
 def compute_jacobian_bounds(self: 'BoundedModule', x, optimize=True,
                             optimize_output_node=None,
-                            bound_lower=True, bound_upper=True):
-    """Compute jacobian bounds on the pre-augmented graph (new API)."""
+                            bound_lower=True, bound_upper=True,
+                            optimize_target='primal'):
+    """Compute jacobian bounds on the pre-augmented graph (new API).
+
+    Args:
+        optimize_target:
+            ``'primal'`` preserves the historical behavior: first optimize the
+            original network output, cache those intermediate bounds, and then
+            run ordinary CROWN on the expanded Jacobian graph.
+
+            ``'jacobian'`` is an experimental direct path: run
+            ``CROWN-Optimized`` on the expanded Jacobian graph itself.
+    """
 
     if isinstance(x, torch.Tensor):
         x = (x,)
+
+    if optimize_target not in ['primal', 'jacobian']:
+        raise ValueError(
+            f'Unsupported optimize_target: {optimize_target}. '
+            'Choose "primal" or "jacobian".')
+
+    if optimize and optimize_target == 'jacobian':
+        if optimize_output_node is not None:
+            raise ValueError(
+                'optimize_output_node is only used when '
+                'optimize_target="primal".')
+        return self.compute_bounds(
+            method='CROWN-Optimized', x=x,
+            bound_lower=bound_lower, bound_upper=bound_upper)
 
     if optimize:
         if optimize_output_node is None:

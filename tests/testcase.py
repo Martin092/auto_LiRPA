@@ -1,5 +1,6 @@
 import unittest
 import random
+from pathlib import Path
 import torch
 import numpy as np
 
@@ -22,8 +23,9 @@ class TestCase(unittest.TestCase):
         self.default_device = device
         set_default_dtype_device(dtype, device)
         self.set_seed(seed)
-        data_path = 'data_64/' if dtype == torch.float64 else 'data/'
-        self.ref_path = data_path + ref_name if ref_name else None
+        tests_dir = Path(__file__).resolve().parent
+        data_dir = 'data_64' if dtype == torch.float64 else 'data'
+        self.ref_path = tests_dir / data_dir / ref_name if ref_name else None
         self.generate = generate
         self.setUp()
 

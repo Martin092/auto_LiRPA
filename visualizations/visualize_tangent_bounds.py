@@ -7,14 +7,34 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from auto_LiRPA.operators.s_shaped import BoundSigmoidSecondGrad, d2sigmoid, d3sigmoid
 
-folder_name = "NAME"
+VALID_METHODS = ('tangent', 'piecewise')
+METHOD_ALIASES = {
+    'same-slope': 'tangent',
+    'old': 'piecewise',
+    's-shape': 'piecewise',
+}
+DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent
+
+
+def normalize_method(method):
+    method = METHOD_ALIASES.get(method, method)
+    if method not in VALID_METHODS:
+        raise ValueError(
+            f'Unsupported method: {method}. Choose one of {VALID_METHODS}.')
+    return method
 
 
 class BoundSigmoidSecondGradVisualizer(BoundSigmoidSecondGrad):
 
-    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+    def __init__(
+            self, attr=None, inputs=None, output_index=0, options=None,
+            method='tangent'):
+        method = normalize_method(method)
+        options = {} if options is None else dict(options)
+        options['sigmoid_second_grad_relaxation'] = method
         super().__init__(attr, inputs, output_index, options)
         self._relaxation_log = []
+        self.method = method
 
     def add_linear_relaxation(self, mask, type, k, x0, y0=None):
         self._relaxation_log.append({
@@ -41,9 +61,16 @@ class BoundSigmoidSecondGradVisualizer(BoundSigmoidSecondGrad):
 
             self.bound_relax(x, init=False)
 
+        def _mask_applies(mask):
+            if mask is None:
+                return True
+            if isinstance(mask, torch.Tensor):
+                return mask.reshape(-1)[0].item()
+            return bool(mask)
+
         def _last_by_type(line_type):
             for entry in reversed(self._relaxation_log):
-                if entry['type'] == line_type:
+                if entry['type'] == line_type and _mask_applies(entry['mask']):
                     return entry
             raise RuntimeError(f'No {line_type} relaxation was recorded.')
 
@@ -65,9 +92,9 @@ class BoundSigmoidSecondGradVisualizer(BoundSigmoidSecondGrad):
         )
 
 
-def plot_bounds_single(ax, low, high, title, bound_obj=None):
+def plot_bounds_single(ax, low, high, title, bound_obj=None, method='tangent'):
     if bound_obj is None:
-        bound_obj = BoundSigmoidSecondGradVisualizer()
+        bound_obj = BoundSigmoidSecondGradVisualizer(method=method)
     
     lower = torch.tensor([low])
     upper = torch.tensor([high])
@@ -123,11 +150,14 @@ def plot_bounds_single(ax, low, high, title, bound_obj=None):
             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
 
-def create_comparison_plot():
+def create_comparison_plot(method='tangent'):
+    method = normalize_method(method)
     fig, axes = plt.subplots(2, 3, figsize=(15, 15))
-    fig.suptitle('Tangent-Based Bounds for d2sigmoid(x)', fontsize=14, fontweight='bold')
+    fig.suptitle(
+        f'{method.capitalize()} Bounds for d2sigmoid(x)',
+        fontsize=14, fontweight='bold')
     
-    bound_obj = BoundSigmoidSecondGradVisualizer()
+    bound_obj = BoundSigmoidSecondGradVisualizer(method=method)
 
     test_cases = [
         (axes[0, 0], -5.0, -2.0, "[-5 -2]"),
@@ -139,7 +169,7 @@ def create_comparison_plot():
     ]
     
     for ax, low, high, title in test_cases:
-        plot_bounds_single(ax, low, high, title, bound_obj)
+        plot_bounds_single(ax, low, high, title, bound_obj, method=method)
     
     handles = [
         mpatches.Patch(color='blue', label='d2sigmoid(x)'),
@@ -153,11 +183,14 @@ def create_comparison_plot():
     return fig
 
 
-def create_bound_envelope_plot():
+def create_bound_envelope_plot(method='tangent'):
+    method = normalize_method(method)
     fig, axes = plt.subplots(2, 3, figsize=(15, 15))
-    fig.suptitle('Bound Envelope Analysis', fontsize=14, fontweight='bold')
+    fig.suptitle(
+        f'Bound Envelope Analysis ({method})',
+        fontsize=14, fontweight='bold')
     
-    bound_obj = BoundSigmoidSecondGradVisualizer()
+    bound_obj = BoundSigmoidSecondGradVisualizer(method=method)
 
     test_cases = [
         (axes[0, 0], -5.0, -2.0, "[-5 -2]"),
@@ -222,50 +255,72 @@ def create_bound_envelope_plot():
     return fig
 
 
-def save_all_plots():
+def save_all_plots(method='tangent', output_root=DEFAULT_OUTPUT_ROOT):
     """Generate and save all visualization plots."""
-    print("Generating visualization plots...")
-    
-    import os
-    os.makedirs('optimal', exist_ok=True)
+    output_root = Path(output_root)
+
+    if method == 'both':
+        figures = []
+        for selected_method in VALID_METHODS:
+            figures.extend(save_all_plots(selected_method, output_root))
+        return figures
+
+    method = normalize_method(method)
+    output_dir = output_root / method
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Generating visualization plots for method: {method}")
     
     print("  - Creating comparison plot...")
-    fig1 = create_comparison_plot()
-    fig1.savefig(f'./{folder_name}/tangent_bounds_comparison.png', dpi=150, bbox_inches='tight')
-    print(f"    Saved: {folder_name}/tangent_bounds_comparison.png")
+    fig1 = create_comparison_plot(method)
+    fig1.savefig(
+        output_dir / 'tangent_bounds_comparison.png',
+        dpi=150, bbox_inches='tight')
+    print(f"    Saved: {output_dir / 'tangent_bounds_comparison.png'}")
     
     print("  - Creating bound envelope plot...")
-    fig2 = create_bound_envelope_plot()
-    fig2.savefig(f'./{folder_name}/bound_envelope.png', dpi=150, bbox_inches='tight')
-    print(f"    Saved: {folder_name}/bound_envelope.png")
+    fig2 = create_bound_envelope_plot(method)
+    fig2.savefig(
+        output_dir / 'bound_envelope.png',
+        dpi=150, bbox_inches='tight')
+    print(f"    Saved: {output_dir / 'bound_envelope.png'}")
     
-    print("\nAll visualizations saved to ./visualizations/")
+    print(f"\nAll {method} visualizations saved to {output_dir}")
     print("\nYou can view the plots interactively by running:")
-    print("  python -c \"from visualize_tangent_bounds import *; create_comparison_plot(); import matplotlib.pyplot as plt; plt.show()\"")
+    print(
+        "  python -c \"from visualize_tangent_bounds import *; "
+        f"create_comparison_plot('{method}'); "
+        "import matplotlib.pyplot as plt; plt.show()\"")
     
-    return fig1, fig2
+    return [fig1, fig2]
 
 
-def show_interactive():
-    print("Generating interactive visualization plots...")
+def show_interactive(method='tangent'):
+    print(f"Generating interactive visualization plots for method: {method}")
     
-    fig1 = create_comparison_plot()
-    fig2 = create_bound_envelope_plot()
+    methods = VALID_METHODS if method == 'both' else (normalize_method(method),)
+    for selected_method in methods:
+        create_comparison_plot(selected_method)
+        create_bound_envelope_plot(selected_method)
     
     plt.show()
 
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='Visualize tangent-based bounds')
-    parser.add_argument('--save', action='store_true', help=f'Save plots to ./{folder_name}/')
+    parser = argparse.ArgumentParser(description='Visualize d2sigmoid bounds')
+    parser.add_argument(
+        '--method', choices=['tangent', 'piecewise', 'both'],
+        default='both', help='Relaxation method to visualize')
+    parser.add_argument(
+        '--output-dir', type=Path, default=DEFAULT_OUTPUT_ROOT,
+        help='Directory where method-specific plot folders are saved')
+    parser.add_argument('--save', action='store_true', help='Save plots')
     parser.add_argument('--show', action='store_true', help='Show interactive plots')
     args = parser.parse_args()
-
-    Path(folder_name).mkdir(exist_ok=True)
     
     if args.save or (not args.save and not args.show):
-        save_all_plots()
+        save_all_plots(args.method, args.output_dir)
     
     if args.show:
-        show_interactive()
+        show_interactive(args.method)

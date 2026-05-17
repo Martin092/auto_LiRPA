@@ -60,7 +60,7 @@ def expand_hessian_node(self, hessian_node):
     input_node = hessian_node.inputs[1]
     prefix = f'/hessian{output_node.name}{input_node.name}'
 
-    logger.info(f'Expanding Hessian node {hessian_node.name}')
+    logger.debug(f'Expanding Hessian node {hessian_node.name}')
     jacobian_node = build_jacobian_graph(
         self, output_node, input_node,
         prefix=f'{prefix}/jacobian1', allow_unused=True)

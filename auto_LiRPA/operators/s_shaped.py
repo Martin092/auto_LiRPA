@@ -796,6 +796,23 @@ class BoundTanhGrad(BoundOptimizableActivation):
         if precompute:
             self.precompute_relaxation()
 
+    def opt_init(self):
+        super().opt_init()
+        self.tp_concave_upper_init = {}
+        self.tp_convex_lower_init = {}
+        self.tp_case2_upper_init = {}
+        self.tp_case2_lower_init = {}
+
+    def _init_opt_parameters_impl(self, size_spec, name_start):
+        """Initialize learnable tangent points for bell-shaped gradients."""
+        l = self.inputs[0].lower
+        alpha = torch.empty(8, size_spec, *l.shape, device=l.device)
+        alpha.data[0:2] = self.tp_concave_upper_init[name_start]
+        alpha.data[2:4] = self.tp_convex_lower_init[name_start]
+        alpha.data[4:6] = self.tp_case2_upper_init[name_start]
+        alpha.data[6:8] = self.tp_case2_lower_init[name_start]
+        return alpha
+
     def forward(self, x):
         return self.func(x)
 
@@ -924,19 +941,12 @@ class BoundTanhGrad(BoundOptimizableActivation):
 
         # The tangent line at the midpoint can be a good approximation
         midpoint = (lower + upper) / 2
-        k_midpoint = dfunc(midpoint)
-        y_midpoint = func(midpoint)
-
         # If -inflection_point <= lower < upper <= inflection_point,
         # we call it "completely concave" region.
         mask_completely_concave = torch.logical_and(
             lower >= -self.inflection_point,
             upper <= self.inflection_point
         )
-        self.add_linear_relaxation(
-            mask=mask_completely_concave, type='lower', k=k_direct, x0=lower, y0=y_l)
-        self.add_linear_relaxation(
-            mask=mask_completely_concave, type='upper', k=k_midpoint, x0=midpoint, y0=y_midpoint)
         
         # From now on, we assume at least one of the bounds is outside the completely concave region.
         # Without loss of generality, we assume upper > inflection_point (indicated by mask_right).
@@ -945,55 +955,124 @@ class BoundTanhGrad(BoundOptimizableActivation):
         dl, du = self.retrieve_from_precompute(upper, flip=False)
         dl_, du_ = self.retrieve_from_precompute(lower, flip=True)
 
+        # In intervals crossing one inflection point, valid upper tangents lie in
+        # [0, du] on the right and [du_, 0] on the left.  The historical
+        # interpolation is still a useful non-optimized initialization, but it
+        # must remain inside that admissible region.
+        right_denom = du + upper
+        right_denom = torch.where(
+            right_denom.abs() < 1e-8, torch.ones_like(right_denom),
+            right_denom)
+        d_case2_right_upper_heuristic = du * (lower + upper) / right_denom
+        d_case2_right_upper = torch.minimum(
+            torch.clamp(d_case2_right_upper_heuristic, min=0), du)
+        left_denom = du_ + lower
+        left_denom = torch.where(
+            left_denom.abs() < 1e-8, -torch.ones_like(left_denom),
+            left_denom)
+        d_case2_left_upper_heuristic = du_ * (upper + lower) / left_denom
+        d_case2_left_upper = torch.maximum(
+            torch.clamp(d_case2_left_upper_heuristic, max=0), du_)
+
+        # Valid lower tangents in those crossing cases stay in the convex tail:
+        # [dl_, upper] on the right and [lower, dl] on the left.
+        d_case2_right_lower = (dl_ + upper) / 2
+        d_case2_left_lower = (dl + lower) / 2
+
+        if self.opt_stage in ['opt', 'reuse']:
+            if not hasattr(self, 'alpha'):
+                self._no_bound_parameters()
+            ns = self._start
+
+            # Clamp learnable tangent points during bound construction because
+            # the admissible intervals depend on the current input bounds.
+            self.alpha[ns].data[0:2] = torch.max(
+                torch.min(self.alpha[ns][0:2], upper), lower)
+            self.alpha[ns].data[2:4] = torch.max(
+                torch.min(self.alpha[ns][2:4], upper), lower)
+
+            case2_upper_low = torch.where(
+                mask_right, torch.zeros_like(lower), du_)
+            case2_upper_high = torch.where(
+                mask_right, du, torch.zeros_like(lower))
+            self.alpha[ns].data[4:6] = torch.max(
+                torch.min(self.alpha[ns][4:6], case2_upper_high),
+                case2_upper_low)
+
+            case2_lower_a = torch.where(mask_right, dl_, lower)
+            case2_lower_b = torch.where(mask_right, upper, dl)
+            case2_lower_low = torch.minimum(case2_lower_a, case2_lower_b)
+            case2_lower_high = torch.maximum(case2_lower_a, case2_lower_b)
+            self.alpha[ns].data[6:8] = torch.max(
+                torch.min(self.alpha[ns][6:8], case2_lower_high),
+                case2_lower_low)
+
+            tp_concave_upper = self.alpha[ns][0:2]
+            tp_convex_lower = self.alpha[ns][2:4]
+            tp_case2_upper = self.alpha[ns][4:6]
+            tp_case2_lower = self.alpha[ns][6:8]
+        else:
+            tp_concave_upper = midpoint
+            tp_convex_lower = midpoint
+            tp_case2_upper = torch.where(
+                mask_right, d_case2_right_upper, d_case2_left_upper)
+            tp_case2_lower = torch.where(
+                mask_right, d_case2_right_lower, d_case2_left_lower)
+
+            if self.opt_stage == 'init':
+                ns = self._start
+                self.tp_concave_upper_init[ns] = midpoint.detach()
+                self.tp_convex_lower_init[ns] = midpoint.detach()
+                self.tp_case2_upper_init[ns] = tp_case2_upper.detach()
+                self.tp_case2_lower_init[ns] = tp_case2_lower.detach()
+
+        self.add_linear_relaxation(
+            mask=mask_completely_concave, type='lower',
+            k=k_direct, x0=lower, y0=y_l)
+        self.add_linear_relaxation(
+            mask=mask_completely_concave, type='upper',
+            k=dfunc(tp_concave_upper), x0=tp_concave_upper,
+            y0=func(tp_concave_upper))
+
         # Case 1: Similar to a convex function
         mask_case1 = torch.logical_or(
-            torch.logical_and(mask_right, lower >= self.inflection_point),
-            torch.logical_and(torch.logical_not(mask_right), upper <= -self.inflection_point)
+            lower >= self.inflection_point,
+            upper <= -self.inflection_point
         )
         self.add_linear_relaxation(
             mask=mask_case1, type='upper', k=k_direct, x0=lower, y0=y_l)
         self.add_linear_relaxation(
-            mask=mask_case1, type='lower', k=k_midpoint, x0=midpoint, y0=y_midpoint)
+            mask=mask_case1, type='lower',
+            k=dfunc(tp_convex_lower), x0=tp_convex_lower,
+            y0=func(tp_convex_lower))
         
         # Case 2: Similar to a S-shaped function
         mask_case2_right = torch.logical_and(mask_right, torch.logical_and(
             upper > self.inflection_point, lower < self.inflection_point))
-        # The upper tangent point is lineraly interpolated between 0 and du,
-        # given lower ranging between -upper and du.
-        d_mask_case2_right_upper = du * (lower + upper) / (du + upper)
-        k_mask_case2_right_upper = dfunc(d_mask_case2_right_upper)
-        y_mask_case2_right_upper = func(d_mask_case2_right_upper)
         self.add_linear_relaxation(
             mask=mask_case2_right, type='upper',
-            k=k_mask_case2_right_upper, x0=d_mask_case2_right_upper, y0=y_mask_case2_right_upper)
+            k=dfunc(tp_case2_upper), x0=tp_case2_upper,
+            y0=func(tp_case2_upper))
         # The lower tangent point is found based on lower.
-        d_mask_case2_right_lower = (dl_ + upper) / 2
-        k_mask_case2_right_lower = dfunc(d_mask_case2_right_lower)
-        y_mask_case2_right_lower = func(d_mask_case2_right_lower)
         self.add_linear_relaxation(
             mask=torch.logical_and(mask_case2_right, dl_ < upper), type='lower',
-            k=k_mask_case2_right_lower, x0=d_mask_case2_right_lower, y0=y_mask_case2_right_lower)
+            k=dfunc(tp_case2_lower), x0=tp_case2_lower,
+            y0=func(tp_case2_lower))
         self.add_linear_relaxation(
             mask=torch.logical_and(mask_case2_right, dl_ >= upper), type='lower',
             k=k_direct, x0=lower, y0=y_l)
 
         mask_case2_left = torch.logical_and(torch.logical_not(mask_right), torch.logical_and(
             lower < -self.inflection_point, upper > -self.inflection_point))
-        # The upper tangent point is lineraly interpolated between du_ and 0,
-        # given upper ranging between du_ and -lower.
-        d_mask_case2_left_upper = du_ * (upper + lower) / (du_ + lower)
-        k_mask_case2_left_upper = dfunc(d_mask_case2_left_upper)
-        y_mask_case2_left_upper = func(d_mask_case2_left_upper)
         self.add_linear_relaxation(
             mask=mask_case2_left, type='upper',
-            k=k_mask_case2_left_upper, x0=d_mask_case2_left_upper, y0=y_mask_case2_left_upper)
+            k=dfunc(tp_case2_upper), x0=tp_case2_upper,
+            y0=func(tp_case2_upper))
         # The lower tangent point is found based on upper.
-        d_mask_case2_left_lower = (dl + lower) / 2
-        k_mask_case2_left_lower = dfunc(d_mask_case2_left_lower)
-        y_mask_case2_left_lower = func(d_mask_case2_left_lower)
         self.add_linear_relaxation(
             mask=torch.logical_and(mask_case2_left, dl > lower), type='lower',
-            k=k_mask_case2_left_lower, x0=d_mask_case2_left_lower, y0=y_mask_case2_left_lower)
+            k=dfunc(tp_case2_lower), x0=tp_case2_lower,
+            y0=func(tp_case2_lower))
         self.add_linear_relaxation(
             mask=torch.logical_and(mask_case2_left, dl <= lower), type='lower',
             k=k_direct, x0=upper, y0=y_u)
@@ -1065,6 +1144,19 @@ class BoundSigmoidSecondGrad(BoundActivation):
         self.ibp_intermediate = True
         self.extreme_point = 1.3169578969248166
         self.outer_inflection_point = 2.2924316695611777
+        options = self.options
+        relaxation = options.get('sigmoid_second_grad_relaxation', 'tangent')
+        relaxation_aliases = {
+            'same-slope': 'tangent',
+            'old': 'piecewise',
+            's-shape': 'piecewise',
+        }
+        self.sigmoid_second_grad_relaxation = relaxation_aliases.get(
+            relaxation, relaxation)
+        if self.sigmoid_second_grad_relaxation not in ['tangent', 'piecewise']:
+            raise ValueError(
+                'Unsupported sigmoid_second_grad_relaxation: '
+                f'{relaxation}. Choose "tangent" or "piecewise".')
 
     def forward(self, x):
         return d2sigmoid(x)
@@ -1092,12 +1184,145 @@ class BoundSigmoidSecondGrad(BoundActivation):
         if init:
             self.init_linear_relaxation(x)
         lower, upper = x.lower, x.upper
+        self._add_interval_relaxation(lower, upper)
+
+        if self.sigmoid_second_grad_relaxation == 'piecewise':
+            self._bound_relax_piecewise(lower, upper)
+        else:
+            self._bound_relax_tangent(lower, upper)
+
+    def _add_interval_relaxation(self, lower, upper):
         interval_lower, interval_upper = self._interval_bounds(lower, upper)
         self.add_linear_relaxation(
             mask=None, type='lower', k=0., x0=0., y0=interval_lower)
         self.add_linear_relaxation(
             mask=None, type='upper', k=0., x0=0., y0=interval_upper)
 
+    def _bound_relax_piecewise(self, lower, upper):
+        extreme = lower.new_tensor(self.extreme_point)
+
+        left_segment = upper <= -extreme
+        middle_segment = torch.logical_and(lower >= -extreme, upper <= extreme)
+        right_segment = lower >= extreme
+
+        self._add_increasing_s_shape_relaxation(
+            left_segment, lower, upper, self.forward, d3sigmoid,
+            -self.outer_inflection_point, left_limit=None,
+            right_limit=-self.extreme_point)
+        self._add_increasing_s_shape_relaxation(
+            middle_segment, lower, upper,
+            lambda z: -self.forward(z), lambda z: -d3sigmoid(z),
+            0., left_limit=-self.extreme_point, right_limit=self.extreme_point,
+            negate=True)
+        self._add_increasing_s_shape_relaxation(
+            right_segment, lower, upper, self.forward, d3sigmoid,
+            self.outer_inflection_point, left_limit=self.extreme_point,
+            right_limit=None)
+
+    def _add_increasing_s_shape_relaxation(
+            self, mask, lower, upper, func, dfunc, inflection_point,
+            left_limit=None, right_limit=None, negate=False):
+        """Add relaxations for an increasing S-shaped segment."""
+        if not mask.any():
+            return
+
+        def add_line(line_type, line_mask, k, x0, y0):
+            if negate:
+                line_type = 'upper' if line_type == 'lower' else 'lower'
+                k, y0 = -k, -y0
+            self.add_linear_relaxation(
+                mask=line_mask, type=line_type, k=k, x0=x0, y0=y0)
+
+        center = lower.new_tensor(inflection_point)
+        y_l, y_u = func(lower), func(upper)
+        k_direct = (y_u - y_l) / (upper - lower).clamp(min=1e-8)
+        midpoint = (lower + upper) / 2
+        y_midpoint = func(midpoint)
+        k_midpoint = dfunc(midpoint)
+
+        mask_left = torch.logical_and(mask, upper <= center)
+        mask_right = torch.logical_and(mask, lower >= center)
+        mask_cross = torch.logical_and(
+            mask, torch.logical_and(lower < center, upper > center))
+
+        # Convex side: tangent lower, secant upper.
+        add_line('lower', mask_left, k_midpoint, midpoint, y_midpoint)
+        add_line('upper', mask_left, k_direct, lower, y_l)
+        # Concave side: secant lower, tangent upper.
+        add_line('lower', mask_right, k_direct, lower, y_l)
+        add_line('upper', mask_right, k_midpoint, midpoint, y_midpoint)
+
+        if not mask_cross.any():
+            return
+
+        mask_direct_lower = torch.logical_and(
+            mask_cross, k_direct < dfunc(lower))
+        mask_direct_upper = torch.logical_and(
+            mask_cross, k_direct < dfunc(upper))
+
+        d_lower = self._find_lower_tangent_point(
+            lower, upper, func, dfunc, inflection_point, left_limit)
+        d_upper = self._find_upper_tangent_point(
+            lower, upper, func, dfunc, inflection_point, right_limit)
+
+        add_line('lower', mask_direct_lower, k_direct, lower, y_l)
+        add_line(
+            'lower',
+            torch.logical_and(mask_cross, torch.logical_not(mask_direct_lower)),
+            dfunc(d_lower), d_lower, func(d_lower))
+        add_line('upper', mask_direct_upper, k_direct, lower, y_l)
+        add_line(
+            'upper',
+            torch.logical_and(mask_cross, torch.logical_not(mask_direct_upper)),
+            dfunc(d_upper), d_upper, func(d_upper))
+
+    def _find_lower_tangent_point(
+            self, lower, upper, func, dfunc, inflection_point, left_limit):
+        center = lower.new_tensor(inflection_point)
+        high = center.expand_as(lower)
+        if left_limit is None:
+            low = torch.minimum(lower, center - 1.)
+            for _ in range(20):
+                checked = (
+                    dfunc(low) * (upper - low) + func(low) <= func(upper))
+                if checked.all():
+                    break
+                low = torch.where(checked, low, center + 2 * (low - center))
+        else:
+            low = lower.new_full(lower.shape, left_limit)
+
+        for _ in range(50):
+            mid = (low + high) / 2
+            checked = (
+                dfunc(mid) * (upper - mid) + func(mid) <= func(upper))
+            low = torch.where(checked, mid, low)
+            high = torch.where(checked, high, mid)
+        return low
+
+    def _find_upper_tangent_point(
+            self, lower, upper, func, dfunc, inflection_point, right_limit):
+        center = lower.new_tensor(inflection_point)
+        low = center.expand_as(lower)
+        if right_limit is None:
+            high = torch.maximum(upper, center + 1.)
+            for _ in range(20):
+                checked = (
+                    dfunc(high) * (lower - high) + func(high) >= func(lower))
+                if checked.all():
+                    break
+                high = torch.where(checked, high, center + 2 * (high - center))
+        else:
+            high = lower.new_full(lower.shape, right_limit)
+
+        for _ in range(50):
+            mid = (low + high) / 2
+            checked = (
+                dfunc(mid) * (lower - mid) + func(mid) >= func(lower))
+            high = torch.where(checked, mid, high)
+            low = torch.where(checked, low, mid)
+        return high
+
+    def _bound_relax_tangent(self, lower, upper):
         lower_k, lower_x0, upper_k, upper_x0 = self._find_bounds_with_tangents(
             lower, upper)
 

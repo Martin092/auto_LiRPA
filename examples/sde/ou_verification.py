@@ -23,6 +23,7 @@ neural candidate on box partitions of the domain.
 """
 
 import argparse
+import copy
 import itertools
 
 import torch
@@ -56,6 +57,16 @@ class HessianWrapper(nn.Module):
 
     def forward(self, state):
         return HessianOP.apply(self.model(state), state)
+
+
+class HessianTraceWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, state):
+        hessian = HessianOP.apply(self.model(state), state)
+        return hessian[:, :, 0, 0] + hessian[:, :, 1, 1]
 
 
 class JacobianWrapper(nn.Module):
@@ -196,8 +207,25 @@ def interval_product_bounds(a_lower, a_upper, b_lower, b_upper):
     return products.min(dim=0).values, products.max(dim=0).values
 
 
+def make_bound_opts(args):
+    return {
+        'optimize_bound_args': {
+            'iteration': args.alpha_crown_iterations,
+            'lr_alpha': args.alpha_crown_lr,
+        },
+        'sigmoid_second_grad_relaxation': (
+            args.sigmoid_second_grad_relaxation),
+    }
+
+
+def make_bounded_module(module, center, bound_opts):
+    return BoundedModule(
+        module, center, bound_opts=copy.deepcopy(bound_opts))
+
+
 def certify_gap_direct(
-        model, x_lower, x_upper, alpha, sigma, method, batch_size):
+        model, x_lower, x_upper, alpha, sigma, method, batch_size,
+        bound_opts):
     """Certify the whole generator expression as one LiRPA graph.
 
     This is potentially tighter than ``certify_gap_separate``, but it exercises
@@ -215,8 +243,8 @@ def certify_gap_direct(
             center,
             PerturbationLpNorm(
                 norm=float('inf'), x_L=batch_lower, x_U=batch_upper))
-        bounded_model = BoundedModule(
-            OUGeneratorGapWrapper(model, alpha, sigma), center)
+        bounded_model = make_bounded_module(
+            OUGeneratorGapWrapper(model, alpha, sigma), center, bound_opts)
         lower, upper = bounded_model.compute_bounds(
             x=(bounded_input,), method=method)
         lower_bounds.append(lower.detach())
@@ -224,8 +252,204 @@ def certify_gap_direct(
     return torch.cat(lower_bounds, dim=0), torch.cat(upper_bounds, dim=0)
 
 
+def summarize_bound_tensor(lower, upper):
+    if lower is None or upper is None:
+        return 'bounds unavailable'
+    width = upper - lower
+    return (
+        f'lower=[{lower.min().item():.3e}, {lower.max().item():.3e}], '
+        f'upper=[{upper.min().item():.3e}, {upper.max().item():.3e}], '
+        f'width_max={width.max().item():.3e}')
+
+
+def node_shape(node):
+    output_shape = getattr(node, 'output_shape', None)
+    if output_shape is not None:
+        return tuple(output_shape)
+    forward_value = getattr(node, 'forward_value', None)
+    if hasattr(forward_value, 'shape'):
+        return tuple(forward_value.shape)
+    lower = getattr(node, 'lower', None)
+    if hasattr(lower, 'shape'):
+        return tuple(lower.shape)
+    return 'unknown'
+
+
+def summarize_mul_interval(node):
+    x, y = node.inputs
+    if (
+            x.lower is None or x.upper is None
+            or y.lower is None or y.upper is None):
+        return None
+    lower, upper = interval_product_bounds(
+        x.lower, x.upper, y.lower, y.upper)
+    return summarize_bound_tensor(lower, upper)
+
+
+def compute_separate_component_bounds(
+        model, box_lower, box_upper, alpha, sigma, method, bound_opts):
+    center = 0.5 * (box_lower + box_upper)
+    bounded_input = BoundedTensor(
+        center,
+        PerturbationLpNorm(
+            norm=float('inf'), x_L=box_lower, x_U=box_upper))
+
+    value_model = make_bounded_module(model, center, bound_opts)
+    value_lower, value_upper = value_model.compute_bounds(
+        x=(bounded_input,), method=method)
+
+    jacobian_model = make_bounded_module(
+        JacobianWrapper(model), center, bound_opts)
+    jacobian_lower, jacobian_upper = jacobian_model.compute_bounds(
+        x=(bounded_input,), method=method)
+
+    hessian_model = make_bounded_module(
+        HessianWrapper(model), center, bound_opts)
+    hessian_lower, hessian_upper = hessian_model.compute_hessian_bounds(
+        bounded_input, method=method)
+
+    trace_model = make_bounded_module(
+        HessianTraceWrapper(model), center, bound_opts)
+    trace_lower, trace_upper = trace_model.compute_bounds(
+        x=(bounded_input,), method=method)
+
+    drift_lower = torch.zeros_like(value_lower)
+    drift_upper = torch.zeros_like(value_upper)
+    for dim in range(2):
+        minus_x_lower = -box_upper[:, dim:dim + 1]
+        minus_x_upper = -box_lower[:, dim:dim + 1]
+        term_lower, term_upper = interval_product_bounds(
+            minus_x_lower, minus_x_upper,
+            jacobian_lower[:, 0, dim:dim + 1],
+            jacobian_upper[:, 0, dim:dim + 1])
+        drift_lower = drift_lower + term_lower
+        drift_upper = drift_upper + term_upper
+
+    entry_trace_lower = (
+        hessian_lower[:, 0, 0, 0:1] + hessian_lower[:, 0, 1, 1:2])
+    entry_trace_upper = (
+        hessian_upper[:, 0, 0, 0:1] + hessian_upper[:, 0, 1, 1:2])
+
+    entry_diffusion_lower = 0.5 * sigma ** 2 * entry_trace_lower
+    entry_diffusion_upper = 0.5 * sigma ** 2 * entry_trace_upper
+    trace_diffusion_lower = 0.5 * sigma ** 2 * trace_lower
+    trace_diffusion_upper = 0.5 * sigma ** 2 * trace_upper
+
+    if alpha >= 0:
+        value_term_lower = alpha * value_lower
+        value_term_upper = alpha * value_upper
+    else:
+        value_term_lower = alpha * value_upper
+        value_term_upper = alpha * value_lower
+
+    separate_lower = drift_lower + entry_diffusion_lower + value_term_lower
+    separate_upper = drift_upper + entry_diffusion_upper + value_term_upper
+    trace_substituted_lower = (
+        drift_lower + trace_diffusion_lower + value_term_lower)
+    trace_substituted_upper = (
+        drift_upper + trace_diffusion_upper + value_term_upper)
+
+    return {
+        'value': (value_lower, value_upper),
+        'jacobian': (jacobian_lower, jacobian_upper),
+        'drift': (drift_lower, drift_upper),
+        'entry_trace': (entry_trace_lower, entry_trace_upper),
+        'direct_trace': (trace_lower, trace_upper),
+        'entry_diffusion': (entry_diffusion_lower, entry_diffusion_upper),
+        'direct_trace_diffusion': (
+            trace_diffusion_lower, trace_diffusion_upper),
+        'value_term': (value_term_lower, value_term_upper),
+        'separate_gap': (separate_lower, separate_upper),
+        'trace_substituted_gap': (
+            trace_substituted_lower, trace_substituted_upper),
+    }
+
+
+def diagnose_direct_muls(
+        model, box_lower, box_upper, alpha, sigma, method, bound_opts,
+        samples=2048):
+    center = 0.5 * (box_lower + box_upper)
+    bounded_input = BoundedTensor(
+        center,
+        PerturbationLpNorm(
+            norm=float('inf'), x_L=box_lower, x_U=box_upper))
+    bounded_model = make_bounded_module(
+        OUGeneratorGapWrapper(model, alpha, sigma), center, bound_opts)
+    direct_lower, direct_upper = bounded_model.compute_bounds(
+        x=(bounded_input,), method=method)
+    components = compute_separate_component_bounds(
+        model, box_lower, box_upper, alpha, sigma, method, bound_opts)
+
+    random_samples = (
+        box_lower
+        + torch.rand(samples, 2, device=box_lower.device)
+        * (box_upper - box_lower))
+    sampled_gap = exact_network_gap(model, random_samples, alpha, sigma)
+
+    print('\nDirect vs separate diagnostics')
+    print(
+        'box lower/upper: '
+        f'{box_lower.squeeze(0).tolist()} -> {box_upper.squeeze(0).tolist()}')
+    print(
+        'direct bound on this box: '
+        f'[{direct_lower.min().item():.6e}, '
+        f'{direct_upper.max().item():.6e}]')
+    print(
+        'sampled exact gap on this box: '
+        f'[{sampled_gap.min().item():.6e}, '
+        f'{sampled_gap.max().item():.6e}]')
+    print(
+        'separate assembled gap: '
+        f'{summarize_bound_tensor(*components["separate_gap"])}')
+    print(
+        'separate gap with direct trace substituted: '
+        f'{summarize_bound_tensor(*components["trace_substituted_gap"])}')
+    print(
+        'drift interval-product contribution: '
+        f'{summarize_bound_tensor(*components["drift"])}')
+    print(
+        'value contribution: '
+        f'{summarize_bound_tensor(*components["value_term"])}')
+    print(
+        'entry-wise summed Hessian trace: '
+        f'{summarize_bound_tensor(*components["entry_trace"])}')
+    print(
+        'direct Hessian trace bound: '
+        f'{summarize_bound_tensor(*components["direct_trace"])}')
+    print(
+        'entry-wise diffusion contribution: '
+        f'{summarize_bound_tensor(*components["entry_diffusion"])}')
+    print(
+        'direct-trace diffusion contribution: '
+        f'{summarize_bound_tensor(*components["direct_trace_diffusion"])}')
+
+    found = False
+    for node in bounded_model.nodes():
+        if type(node).__name__ != 'BoundMul' or len(node.inputs) != 2:
+            continue
+        if not all(getattr(inp, 'perturbed', False) for inp in node.inputs):
+            continue
+        found = True
+        print(f'\n{node.name}: {type(node).__name__}')
+        print(
+            '  output '
+            f'shape={node_shape(node)} '
+            f'{summarize_bound_tensor(node.lower, node.upper)}')
+        interval_summary = summarize_mul_interval(node)
+        if interval_summary is not None:
+            print(f'  interval product estimate {interval_summary}')
+        for i, inp in enumerate(node.inputs):
+            print(
+                f'  input {i} {inp.name}: {type(inp).__name__} '
+                f'shape={node_shape(inp)} '
+                f'{summarize_bound_tensor(inp.lower, inp.upper)}')
+    if not found:
+        print('No BoundMul nodes with two perturbed inputs were found.')
+
+
 def certify_gap_separate(
-        model, x_lower, x_upper, alpha, sigma, method, batch_size):
+        model, x_lower, x_upper, alpha, sigma, method, batch_size,
+        bound_opts):
     upper_bounds = []
     lower_bounds = []
     for start in range(0, x_lower.shape[0], batch_size):
@@ -238,15 +462,17 @@ def certify_gap_separate(
             PerturbationLpNorm(
                 norm=float('inf'), x_L=batch_lower, x_U=batch_upper))
 
-        value_model = BoundedModule(model, center)
+        value_model = make_bounded_module(model, center, bound_opts)
         value_lower, value_upper = value_model.compute_bounds(
             x=(bounded_input,), method=method)
 
-        jacobian_model = BoundedModule(JacobianWrapper(model), center)
+        jacobian_model = make_bounded_module(
+            JacobianWrapper(model), center, bound_opts)
         jacobian_lower, jacobian_upper = jacobian_model.compute_bounds(
             x=(bounded_input,), method=method)
 
-        hessian_model = BoundedModule(HessianWrapper(model), center)
+        hessian_model = make_bounded_module(
+            HessianWrapper(model), center, bound_opts)
         hessian_lower, hessian_upper = hessian_model.compute_hessian_bounds(
             bounded_input, method=method)
 
@@ -285,13 +511,15 @@ def certify_gap_separate(
 
 def certify_gap(
         model, x_lower, x_upper, alpha, sigma, method, batch_size,
-        certifier):
+        certifier, bound_opts):
     if certifier == 'direct':
         return certify_gap_direct(
-            model, x_lower, x_upper, alpha, sigma, method, batch_size)
+            model, x_lower, x_upper, alpha, sigma, method, batch_size,
+            bound_opts)
     if certifier == 'separate':
         return certify_gap_separate(
-            model, x_lower, x_upper, alpha, sigma, method, batch_size)
+            model, x_lower, x_upper, alpha, sigma, method, batch_size,
+            bound_opts)
     raise ValueError(f'Unknown certifier: {certifier}')
 
 
@@ -368,15 +596,23 @@ def run_benchmark(args):
     total_boxes = args.grid_splits ** 2
     x_lower, x_upper = make_domain_boxes(
         args.grid_splits, device, args.exclude_origin_radius)
+    bound_opts = make_bound_opts(args)
     certified_lower, certified_upper = certify_gap(
         model, x_lower, x_upper, args.alpha, args.sigma,
-        args.bound_method, args.cert_batch_size, args.certifier)
+        args.bound_method, args.cert_batch_size, args.certifier, bound_opts)
+    worst_certified_index = certified_upper.argmax().item()
 
     print_summary(
         fit_max_error, fit_mean_error, samples, network_gap,
         quadratic_gap, certified_lower, certified_upper,
         args.alpha, args.sigma, args.exclude_origin_radius,
         x_lower.shape[0], total_boxes)
+    if args.diagnose_direct_muls:
+        diagnose_direct_muls(
+            model,
+            x_lower[worst_certified_index:worst_certified_index + 1],
+            x_upper[worst_certified_index:worst_certified_index + 1],
+            args.alpha, args.sigma, args.bound_method, bound_opts)
 
 
 def parse_args():
@@ -399,12 +635,29 @@ def parse_args():
             '||x|| < radius, and draw evaluation samples outside it.'))
     parser.add_argument('--cert-batch-size', type=int, default=8)
     parser.add_argument(
-        '--bound-method', choices=('IBP', 'backward'), default='backward')
+        '--bound-method',
+        choices=('IBP', 'CROWN', 'alpha-CROWN'),
+        default='alpha-CROWN')
     parser.add_argument(
-        '--certifier', choices=('direct', 'separate'), default='separate',
+        '--alpha-crown-iterations', type=int, default=20,
+        help='Number of optimization iterations for alpha-CROWN bounds.')
+    parser.add_argument(
+        '--alpha-crown-lr', type=float, default=0.1,
+        help='Learning rate for alpha-CROWN relaxation parameters.')
+    parser.add_argument(
+        '--sigmoid-second-grad-relaxation',
+        choices=('tangent', 'piecewise'), default='tangent',
+        help='Relaxation method for sigmoid second-gradient bounds.')
+    parser.add_argument(
+        '--certifier', choices=('direct', 'separate'), default='direct',
         help=(
             'direct bounds the full generator graph and is experimental; '
             'separate bounds V, grad V, and Hessian V independently.'))
+    parser.add_argument(
+        '--diagnose-direct-muls', action='store_true',
+        help=(
+            'After certification, rerun the direct graph on the worst box and '
+            'print BoundMul nodes whose two inputs are both perturbed.'))
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--device', default='cpu')
     return parser.parse_args()
