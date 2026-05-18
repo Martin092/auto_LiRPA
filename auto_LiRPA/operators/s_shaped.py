@@ -1137,7 +1137,7 @@ class SigmoidSecondGrad(Module):
         return g * SigmoidSecondGradOp.apply(preact).unsqueeze(1)
 
 
-class BoundSigmoidSecondGrad(BoundActivation):
+class BoundSigmoidSecondGrad(BoundOptimizableActivation):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.requires_input_bounds = [0]
@@ -1157,6 +1157,19 @@ class BoundSigmoidSecondGrad(BoundActivation):
             raise ValueError(
                 'Unsupported sigmoid_second_grad_relaxation: '
                 f'{relaxation}. Choose "tangent" or "piecewise".')
+
+    def opt_init(self):
+        super().opt_init()
+        self.tp_lower_init = {}
+        self.tp_upper_init = {}
+
+    def _init_opt_parameters_impl(self, size_spec, name_start):
+        l = self.inputs[0].lower
+        shape = l.shape
+        alpha = torch.empty(2, size_spec, *shape, device=l.device)
+        alpha.data[0] = self.tp_lower_init[name_start]
+        alpha.data[1] = self.tp_upper_init[name_start]
+        return alpha
 
     def forward(self, x):
         return d2sigmoid(x)
@@ -1180,9 +1193,9 @@ class BoundSigmoidSecondGrad(BoundActivation):
 
         return bound_lower, bound_upper
 
-    def bound_relax(self, x, init=False):
+    def bound_relax(self, x, init=False, dim_opt=None):
         if init:
-            self.init_linear_relaxation(x)
+            self.init_linear_relaxation(x, dim_opt)
         lower, upper = x.lower, x.upper
         self._add_interval_relaxation(lower, upper)
 
@@ -1392,6 +1405,76 @@ class BoundSigmoidSecondGrad(BoundActivation):
         # upper_k = torch.where(upper_valid, d3sigmoid(optimized_upper_x0), upper_k)
         # lower_x0 = torch.where(lower_valid, optimized_lower_x0, lower_x0)
         # upper_x0 = torch.where(upper_valid, optimized_upper_x0, upper_x0)
+
+        if getattr(self, 'opt_stage', None) in ['opt', 'reuse']:
+            if not hasattr(self, 'alpha'):
+                self._no_bound_parameters()
+            ns = self._start
+            self.alpha[ns].data[0:1] = torch.max(
+                torch.min(self.alpha[ns][0:1], upper), lower)
+            self.alpha[ns].data[1:2] = torch.max(
+                torch.min(self.alpha[ns][1:2], upper), lower)
+
+            opt_lower = self.alpha[ns][0]
+            opt_upper = self.alpha[ns][1]
+
+            steps = 16
+            t = torch.linspace(0.0, 1.0, steps, device=lower.device, dtype=lower.dtype)
+            target_shape = opt_lower.shape
+
+            def _align_to_target(value, target_shape):
+                if value.shape == target_shape:
+                    return value
+                if value.ndim == len(target_shape):
+                    return value.reshape(target_shape)
+
+                pad = len(target_shape) - value.ndim
+                candidates = [
+                    value.reshape((1,) * pad + value.shape),
+                    value.reshape(value.shape + (1,) * pad),
+                ]
+                for candidate in candidates:
+                    try:
+                        return candidate.expand(target_shape)
+                    except RuntimeError:
+                        continue
+                raise RuntimeError(
+                    f'Could not align tensor shape {tuple(value.shape)} to {tuple(target_shape)}')
+
+            lower_base = _align_to_target(lower, target_shape)
+            upper_base = _align_to_target(upper, target_shape)
+
+            lower_flat = lower_base.reshape(-1)
+            upper_flat = upper_base.reshape(-1)
+            t = t.view(t.numel(), 1)
+            width = (upper_flat - lower_flat).unsqueeze(0)
+            x_grid = lower_flat.unsqueeze(0) + t * width
+
+            k_lower = d3sigmoid(opt_lower)
+            k_lower_flat = k_lower.reshape(-1)
+            opt_lower_flat = opt_lower.reshape(-1)
+            line_lower = k_lower_flat.unsqueeze(0) * (
+                x_grid - opt_lower_flat.unsqueeze(0)) + self.forward(opt_lower).reshape(-1).unsqueeze(0)
+            f_x = self.forward(x_grid)
+            violation_lower = (line_lower - f_x).amax(dim=0)
+            valid_lower = (violation_lower <= 1e-9).reshape(opt_lower.shape)
+
+            k_upper = d3sigmoid(opt_upper)
+            k_upper_flat = k_upper.reshape(-1)
+            opt_upper_flat = opt_upper.reshape(-1)
+            line_upper = k_upper_flat.unsqueeze(0) * (
+                x_grid - opt_upper_flat.unsqueeze(0)) + self.forward(opt_upper).reshape(-1).unsqueeze(0)
+            violation_upper = (f_x - line_upper).amax(dim=0)
+            valid_upper = (violation_upper <= 1e-9).reshape(opt_upper.shape)
+
+            lower_k = torch.where(valid_lower, k_lower, lower_k)
+            lower_x0 = torch.where(valid_lower, opt_lower, lower_x0)
+            upper_k = torch.where(valid_upper, k_upper, upper_k)
+            upper_x0 = torch.where(valid_upper, opt_upper, upper_x0)
+        elif getattr(self, 'opt_stage', None) == 'init':
+            ns = self._start
+            self.tp_lower_init[ns] = lower_x0.detach()
+            self.tp_upper_init[ns] = upper_x0.detach()
 
         return lower_k, lower_x0, upper_k, upper_x0
 
