@@ -49,6 +49,19 @@ class SoftplusLyapunovMLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+class SigmoidLyapunovMLP(nn.Module):
+    def __init__(self, hidden_width=16):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(2, hidden_width),
+            nn.Sigmoid(),
+            nn.Linear(hidden_width, hidden_width),
+            nn.Sigmoid(),
+            nn.Linear(hidden_width, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 class HessianWrapper(nn.Module):
     def __init__(self, model):
@@ -195,6 +208,14 @@ def make_domain_boxes(splits, device, exclude_radius=0.0):
             'No certification boxes remain after excluding the origin radius; '
             'reduce --exclude-origin-radius or increase --grid-splits.')
     return torch.stack(lowers), torch.stack(uppers)
+
+
+def points_in_box_union(points, box_lower, box_upper):
+    """Return whether each point lies in at least one retained box."""
+    in_each_box = torch.logical_and(
+        points.unsqueeze(1) >= box_lower.unsqueeze(0),
+        points.unsqueeze(1) <= box_upper.unsqueeze(0)).all(dim=-1)
+    return in_each_box.any(dim=1)
 
 
 def interval_product_bounds(a_lower, a_upper, b_lower, b_upper):
@@ -525,13 +546,28 @@ def certify_gap(
 
 def print_summary(
         fit_max_error, fit_mean_error, samples, network_gap,
-        quadratic_gap, certified_lower, certified_upper, alpha, sigma,
-        exclude_radius, certified_boxes, total_boxes):
+        quadratic_gap, certified_sample_mask, certified_lower,
+        certified_upper, alpha, sigma, exclude_radius, certified_boxes,
+        total_boxes):
     worst_network_gap = network_gap.max().item()
     worst_quadratic_gap = quadratic_gap.max().item()
     worst_certified_gap = certified_upper.max().item()
     worst_certified_index = certified_upper.argmax().item()
     worst_sample = samples[network_gap.argmax().item()]
+    certified_sample_count = certified_sample_mask.sum().item()
+
+    if certified_sample_count:
+        certified_network_gap = network_gap[certified_sample_mask]
+        certified_quadratic_gap = quadratic_gap[certified_sample_mask]
+        worst_certified_sample_gap = certified_network_gap.max().item()
+        worst_certified_quadratic_gap = certified_quadratic_gap.max().item()
+        certified_samples = samples[certified_sample_mask]
+        worst_certified_sample = certified_samples[
+            certified_network_gap.argmax().item()]
+    else:
+        worst_certified_sample_gap = None
+        worst_certified_quadratic_gap = None
+        worst_certified_sample = None
 
     print('\n2D OU Lyapunov benchmark')
     print(f'alpha: {alpha:.4f}, sigma: {sigma:.4f}')
@@ -547,13 +583,29 @@ def print_summary(
         'fit error to 0.5 ||x||^2: '
         f'max={fit_max_error:.6e}, mean={fit_mean_error:.6e}')
     print(
-        'worst sampled network gap '
+        'worst sampled network gap on punctured domain '
         f'L V + alpha V: {worst_network_gap:.6e} '
         f'at x=({worst_sample[0].item():.4f}, '
         f'{worst_sample[1].item():.4f})')
     print(
-        'worst sampled analytical quadratic gap: '
+        'worst sampled analytical quadratic gap on punctured domain: '
         f'{worst_quadratic_gap:.6e}')
+    print(
+        'evaluation samples inside certified box union: '
+        f'{certified_sample_count}/{samples.shape[0]}')
+    if worst_certified_sample_gap is not None:
+        print(
+            'worst sampled network gap inside certified box union '
+            f'L V + alpha V: {worst_certified_sample_gap:.6e} '
+            f'at x=({worst_certified_sample[0].item():.4f}, '
+            f'{worst_certified_sample[1].item():.4f})')
+        print(
+            'worst sampled analytical quadratic gap inside certified '
+            f'box union: {worst_certified_quadratic_gap:.6e}')
+    else:
+        print(
+            'worst sampled network gap inside certified box union: '
+            'unavailable (no evaluation samples landed in retained boxes)')
     print(
         'worst certified upper gap over boxes: '
         f'{worst_certified_gap:.6e} '
@@ -580,9 +632,10 @@ def run_benchmark(args):
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
 
-    model = SoftplusLyapunovMLP(
-        hidden_width=args.hidden_width,
-        beta=args.softplus_beta).to(device).double()
+    # model = SoftplusLyapunovMLP(
+    #     hidden_width=args.hidden_width,
+    #     beta=args.softplus_beta).to(device).double()
+    model = SigmoidLyapunovMLP(hidden_width=args.hidden_width).double()
 
     fit_max_error, fit_mean_error = train_certificate(
         model, args.epochs, args.train_samples, args.batch_size,
@@ -596,6 +649,7 @@ def run_benchmark(args):
     total_boxes = args.grid_splits ** 2
     x_lower, x_upper = make_domain_boxes(
         args.grid_splits, device, args.exclude_origin_radius)
+    certified_sample_mask = points_in_box_union(samples, x_lower, x_upper)
     bound_opts = make_bound_opts(args)
     certified_lower, certified_upper = certify_gap(
         model, x_lower, x_upper, args.alpha, args.sigma,
@@ -604,7 +658,8 @@ def run_benchmark(args):
 
     print_summary(
         fit_max_error, fit_mean_error, samples, network_gap,
-        quadratic_gap, certified_lower, certified_upper,
+        quadratic_gap, certified_sample_mask, certified_lower,
+        certified_upper,
         args.alpha, args.sigma, args.exclude_origin_radius,
         x_lower.shape[0], total_boxes)
     if args.diagnose_direct_muls:
@@ -647,7 +702,9 @@ def parse_args():
     parser.add_argument(
         '--sigmoid-second-grad-relaxation',
         choices=('tangent', 'piecewise'), default='tangent',
-        help='Relaxation method for sigmoid second-gradient bounds.')
+        help=(
+            'Relaxation method for sigmoid second-gradient bounds; '
+            'piecewise enables alpha-CROWN optimization.'))
     parser.add_argument(
         '--certifier', choices=('direct', 'separate'), default='direct',
         help=(

@@ -721,16 +721,19 @@ def _get_optimized_bounds(
         stop_criterion_final = isinstance(
             stop_criterion, torch.Tensor) and stop_criterion.all()
 
-        if i == iteration - 1:
+        cast_back_to_default = (
+            i == iteration - 1 and self.device == 'cuda'
+            and torch.get_default_dtype() == torch.float32
+            and use_float64_in_last_iteration
+        )
+        if cast_back_to_default:
             best_ret = list(best_ret)
             if best_ret[0] is not None:
                 best_ret[0] = best_ret[0].to(torch.get_default_dtype())
             if best_ret[1] is not None:
                 best_ret[1] = best_ret[1].to(torch.get_default_dtype())
 
-        if (i == iteration - 1 and self.device == 'cuda'
-                and torch.get_default_dtype() == torch.float32
-                and use_float64_in_last_iteration):
+        if cast_back_to_default:
             total_loss, x, full_ret = self._to_default_dtype(
                 x, total_loss, full_ret, ret, best_intermediate_bounds, return_A)
 
