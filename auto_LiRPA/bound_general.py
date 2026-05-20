@@ -719,6 +719,11 @@ class BoundedModule(nn.Module):
         model.to('cpu')
         nodesOP, nodesIn, nodesOut, template = parse_module(
             model, global_input_cpu)
+
+        for n in nodesOP: print("\tNode op: ", n)
+        for n in nodesIn: print("\tNode in: ", n)
+        for n in nodesOut: print("\tNode out: ", n)
+        print()
         model.to(self.device)
         for i in range(0, len(nodesIn)):
             if nodesIn[i].param is not None:
@@ -762,6 +767,7 @@ class BoundedModule(nn.Module):
                     raise KeyError
             except (NameError, KeyError):
                 unsupported_ops.append(nodesOP[n])
+                print("Unsupported: ", nodesOP[n])
                 logger.error('The node has an unsupported operation: %s',
                              nodesOP[n])
                 continue

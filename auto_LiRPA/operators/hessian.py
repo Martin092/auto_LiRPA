@@ -35,6 +35,14 @@ class HessianOP(torch.autograd.Function):
             output.shape[0], output_.shape[-1],
             *input_shape, *input_shape)
 
+class BoundHessianInit(Bound):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+        self.never_perturbed = True
+        self.no_jacobian = True
+
+    def forward(self, x, y):
+        return torch.zeros(x.shape[0], *y.shape[1:], *x.shape[1:], *x.shape[1:])
 
 class BoundHessianOP(Bound):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):

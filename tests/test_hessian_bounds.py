@@ -7,6 +7,7 @@ import torch.nn as nn
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.hessian import HessianOP
 from auto_LiRPA.perturbations import PerturbationLpNorm
+from auto_LiRPA.utils import logger
 
 
 def _scalar_hessian(model, x):
@@ -149,6 +150,9 @@ def test_native_softplus_linear_network_hessian_contains_sampled_points():
     x = BoundedTensor(
         x0, PerturbationLpNorm(norm=float('inf'), eps=eps))
     lower, upper = bounded.compute_hessian_bounds(x)
+
+    print("Lower: ", lower)
+    print("Upper: ", upper)
 
     grids = [
         torch.linspace(

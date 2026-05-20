@@ -18,6 +18,8 @@
 those placed in separate files."""
 import torch
 from torch.nn import Module
+
+from .s_shaped import SigmoidGrad
 from .base import *
 from .activation_base import BoundActivation, BoundOptimizableActivation
 from .clampmult import multiply_by_A_signs
@@ -59,6 +61,11 @@ class BoundSoftplus(BoundActivation):
         grad_input = (grad_upstream, self.inputs[0].forward_value)
         return [(grad_node, grad_input, [self.inputs[0]])]
 
+    def build_hessian_node(self, grad_upstream, hessian_upstream):
+        hessian_node = SoftplusHessian(beta=self.softplus.beta)
+        hessian_input = (grad_upstream, hessian_upstream, self.inputs[0].forward_value)
+        return [(hessian_node, hessian_input, [self.inputs[0]])]
+
 
 class SoftplusGrad(Module):
     def __init__(self, beta=1.0, threshold=20.0):
@@ -69,6 +76,21 @@ class SoftplusGrad(Module):
     def forward(self, grad_last, preact):
         grad = torch.sigmoid(self.beta * preact)
         return grad_last * grad.unsqueeze(1)
+
+
+class SoftplusHessian(Module):
+    def __init__(self, beta=1.0):
+        super().__init__()
+        self.beta = beta
+
+    def forward(self, grad_last, hessian_last, preact):
+        d1 = torch.sigmoid(self.beta * preact)
+        d2 = self.beta * d1 * (1 - d1)
+        grad_input = grad_last * d1.unsqueeze(1)
+        scale = d1.unsqueeze(1).unsqueeze(-1) * d1.unsqueeze(1).unsqueeze(-2)
+        hessian_input = hessian_last * scale
+        hessian_input.diagonal(dim1=-2, dim2=-1).add_(grad_last * d2.unsqueeze(1))
+        return grad_input, hessian_input
 
 
 class BoundAbs(BoundActivation):
@@ -404,6 +426,7 @@ class BoundHardTanh(BoundActivation):
             cond = (uw > 0.5).to(uw)
             lw += case5 * cond
             lb += case5 * min_val * (1 - cond)
+
 
         # Case 6:
         # Upper bound is larger than the max val and the lower bound

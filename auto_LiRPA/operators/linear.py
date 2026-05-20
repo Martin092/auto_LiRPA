@@ -63,6 +63,8 @@ class BoundLinear(BoundOptimizableActivation):
         # In this case, we swap the roles of x and weight.
         self.swap_x_and_weight = False
 
+        self.no_hessian = False
+
     def _preprocess(self, a, b, c=None):
         """Handle tranpose and linear coefficients."""
         if self.transA and isinstance(a, Tensor):
@@ -951,8 +953,10 @@ class BoundLinear(BoundOptimizableActivation):
             raise NotImplementedError(
                 "Gradient computation for weight perturbation is not supported yet.")
 
-    def update_requires_input_bounds(self):
-        self._check_weight_perturbation()
+    def build_hessian_node(self, grad_upstream, hessian_upstream):
+        grad_node = LinearHessianProp()
+        grad_input = (grad_upstream, hessian_upstream, self.inputs[1].forward_value)
+        return [(grad_node, grad_input, [self.inputs[0], self.inputs[1]])]
 
 
 class BoundMatMul(BoundLinear):
@@ -1110,6 +1114,21 @@ class LinearGrad(Module):
     def forward(self, grad_last):
         weight = self.weight.to(grad_last).t()
         return F.linear(grad_last, weight)
+
+class LinearHessian(Module):
+    def __init__(self, weight):
+        super().__init__()
+        self.input_dim = weight.shape[0]
+        self.out_dim = weight.shape[1] # not handling 3d layers, dont think we should either
+
+    def forward(self):
+        return torch.zeros(self.out_dim, self.input_dim, self.input_dim)
+
+class LinearHessianProp(Module):
+    def forward(self, grad_upstream, hessian_upstream, weight):
+        grad_input = grad_upstream @ weight
+        hessian_input = weight.T @ hessian_upstream @ weight
+        return grad_input, hessian_input
 
 
 class MatMulGrad(Module):

@@ -145,6 +145,7 @@ class Bound(nn.Module):
         # If True, when building the Jacobian graph, this node should be treated
         # as a constant and there is no need to further propagate Jacobian.
         self.no_jacobian = False
+        self.no_hessian = False
         # If True, when we are computing intermediate bounds for these ops,
         # we simply use IBP to propagate bounds from its input nodes
         # instead of CROWN. Currently only operators with a single input can be
@@ -464,6 +465,12 @@ class Bound(nn.Module):
                 grad_extra_nodes (list): Extra nodes needed for the gradient.
         """
         return not_implemented_op(self, 'build_gradient_node')
+
+    def  build_hessian_trace_node(self, grad_upstream, trace_upstream):
+        return not_implemented_op(self, 'build_hessian_trace_node')
+
+    def  build_hessian_node(self, grad_upstream, hessian_upstream):
+        return not_implemented_op(self, 'build_hessian_node')
 
     def get_bias(self, A, bias):
         if A is None:

@@ -151,8 +151,8 @@ def compute_jacobians(model_ori, x0, bound_opts=None, device='cpu'):
     print('Model:', model_ori)
 
     results[0] = example_jacobian(model_ori, x0, bound_opts, device)
-    results[1] = example_local_lipschitz(model_ori, x0, bound_opts, device)
-    results[2] = example_jvp(model_ori, x0, bound_opts, device)
+    # results[1] = example_local_lipschitz(model_ori, x0, bound_opts, device)
+    # results[2] = example_jvp(model_ori, x0, bound_opts, device)
 
     return results
 
@@ -164,5 +164,8 @@ if __name__ == '__main__':
     model_ori = build_model(in_dim=8)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     x0 = torch.randn(1, 3, 8, 8, device=device)
+
+    print("*"*100)
+    print(x0)
 
     compute_jacobians(model_ori, x0, device=device)
