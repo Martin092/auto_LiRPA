@@ -62,7 +62,12 @@ class BoundSoftplus(BoundActivation):
         return [(grad_node, grad_input, [self.inputs[0]])]
 
     def build_hessian_node(self, grad_upstream, hessian_upstream):
-        hessian_node = SoftplusHessian(beta=self.softplus.beta)
+        preact = self.inputs[0].forward_value
+        hessian_node = SoftplusHessian(
+            beta=self.softplus.beta,
+            dim=preact.shape[-1],
+            dtype=preact.dtype,
+            device=preact.device)
         hessian_input = (grad_upstream, hessian_upstream, self.inputs[0].forward_value)
         return [(hessian_node, hessian_input, [self.inputs[0]])]
 
@@ -79,17 +84,19 @@ class SoftplusGrad(Module):
 
 
 class SoftplusHessian(Module):
-    def __init__(self, beta=1.0):
+    def __init__(self, beta=1.0, dim=None, dtype=None, device=None):
         super().__init__()
         self.beta = beta
+        self.register_buffer(
+            'eye', torch.eye(dim, dtype=dtype, device=device))
 
     def forward(self, grad_last, hessian_last, preact):
         d1 = torch.sigmoid(self.beta * preact)
         d2 = self.beta * d1 * (1 - d1)
         grad_input = grad_last * d1.unsqueeze(1)
         scale = d1.unsqueeze(1).unsqueeze(-1) * d1.unsqueeze(1).unsqueeze(-2)
-        hessian_input = hessian_last * scale
-        hessian_input.diagonal(dim1=-2, dim2=-1).add_(grad_last * d2.unsqueeze(1))
+        diagonal_term = (grad_last * d2.unsqueeze(1)).unsqueeze(-1) * self.eye
+        hessian_input = hessian_last * scale + diagonal_term
         return grad_input, hessian_input
 
 

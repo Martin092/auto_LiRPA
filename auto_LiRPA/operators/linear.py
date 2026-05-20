@@ -954,9 +954,24 @@ class BoundLinear(BoundOptimizableActivation):
                 "Gradient computation for weight perturbation is not supported yet.")
 
     def build_hessian_node(self, grad_upstream, hessian_upstream):
-        grad_node = LinearHessianProp()
-        grad_input = (grad_upstream, hessian_upstream, self.inputs[1].forward_value)
-        return [(grad_node, grad_input, [self.inputs[0], self.inputs[1]])]
+        if not self.is_input_perturbed(1):
+            if isinstance(self.inputs[1], BoundParams):
+                w = self.inputs[1].param
+            elif isinstance(self.inputs[1], BoundBuffers):
+                w = self.inputs[1].buffer
+            else:
+                w = self.inputs[1].value
+            if not self.transB:
+                w = w.t()
+            grad_node = LinearHessianProp(w.detach())
+            grad_input = (grad_upstream, hessian_upstream)
+            return [(grad_node, grad_input, [])]
+        else:
+            raise NotImplementedError(
+                "Hessian computation for weight perturbation is not supported yet.")
+
+    def update_requires_input_bounds(self):
+        self._check_weight_perturbation()
 
 
 class BoundMatMul(BoundLinear):
@@ -1125,7 +1140,12 @@ class LinearHessian(Module):
         return torch.zeros(self.out_dim, self.input_dim, self.input_dim)
 
 class LinearHessianProp(Module):
-    def forward(self, grad_upstream, hessian_upstream, weight):
+    def __init__(self, weight):
+        super().__init__()
+        self.weight = weight
+
+    def forward(self, grad_upstream, hessian_upstream):
+        weight = self.weight.to(grad_upstream)
         grad_input = grad_upstream @ weight
         hessian_input = weight.T @ hessian_upstream @ weight
         return grad_input, hessian_input

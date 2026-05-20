@@ -157,12 +157,33 @@ def build_hessian_graph(
         self.add_nodes([zero_node])
         return zero_node
 
-    # Second BFS pass: build the backward computational graph
+    # Second BFS pass: build the backward computational graph.
+    # Hessian propagation carries two states through every node:
+    # the upstream gradient and the upstream Hessian.
+    grad_node = {}
     hess_node = {}
-    initial_name = f'{prefix}{output_node.name}'
-    hess_node[output_node.name] = BoundHessianInit(inputs=[input_node, output_node])
-    hess_node[output_node.name].name = initial_name
-    self.add_nodes([hess_node[output_node.name]])
+    initial_grad_name = f'{prefix}{output_node.name}/grad'
+    initial_hess_name = f'{prefix}{output_node.name}/hessian'
+    grad_node[output_node.name] = BoundJacobianInit(inputs=[output_node])
+    grad_node[output_node.name].name = initial_grad_name
+    hess_node[output_node.name] = BoundHessianInit(
+        inputs=[output_node, output_node])
+    hess_node[output_node.name].name = initial_hess_name
+    self.add_nodes([grad_node[output_node.name], hess_node[output_node.name]])
+
+    def add_or_accumulate(node_map, input_name, new_node, tag):
+        if input_name in node_map:
+            node_cur = node_map[input_name]
+            print("ADDING ", node_cur, " and ", new_node)
+            node_add = BoundAdd(
+                attr=None, inputs=[node_cur, new_node],
+                output_index=0, options={})
+            node_add.name = f'{new_node.name}/{tag}_add'
+            node_map[input_name] = node_add
+            self.add_nodes([node_add])
+        else:
+            node_map[input_name] = new_node
+
     queue = deque([output_node])
     while len(queue) > 0:
         node = queue.popleft()
@@ -199,9 +220,12 @@ def build_hessian_graph(
             logger.debug(f'Generated backwards ops: {nodes_op}')
             rename_dict = {}
             assert isinstance(nodes_in[0], BoundInput)
-            rename_dict[nodes_in[0].name] = hess_node[node.name].name
-            for i in range(1, len(nodes_in)):
-                # Assume it's a parameter here
+            assert isinstance(nodes_in[1], BoundInput)
+            rename_dict[nodes_in[0].name] = grad_node[node.name].name
+            rename_dict[nodes_in[1].name] = hess_node[node.name].name
+            for i in range(2, len(nodes_in)):
+                # Extra helper inputs are dependencies such as preactivations,
+                # weights, or constants. They are replaced below.
                 new_name = f'{prefix}{node.name}/{k}/params{nodes_in[i].name}'
                 rename_dict[nodes_in[i].name] = new_name
             for i in range(len(nodes_op)):
@@ -213,12 +237,25 @@ def build_hessian_graph(
             # assert len(nodes_out) == 1
 
             # print("NODES OUT: ", nodes_out)
-            nodes_out = nodes_out[0]
-            rename_dict[nodes_out.name] = f'{prefix}{node.name}/{k}/output'
+            if len(nodes_out) != 2:
+                raise RuntimeError(
+                    f'Hessian propagation node for {node} must return '
+                    f'(gradient, hessian), got {len(nodes_out)} outputs.')
+            grad_out, hess_out = nodes_out
+            rename_dict[grad_out.name] = f'{prefix}{node.name}/{k}/grad_output'
+            rename_dict[hess_out.name] = f'{prefix}{node.name}/{k}/hessian_output'
 
             self.rename_nodes(nodes_op, nodes_in, rename_dict)
+            deps = node_grad_ori[node.name][k][2]
+            extra_input_count = len(nodes_in) - 2
+            if len(deps) > extra_input_count:
+                raise RuntimeError(
+                    f'Hessian propagation node for {node} expected at most '
+                    f'{extra_input_count} extra dependencies, got '
+                    f'{len(deps)}.')
             input_nodes_replace = (
-                [self._modules[nodes_in[0].name]] + node_grad_ori[node.name][k][2])
+                [self._modules[nodes_in[0].name],
+                 self._modules[nodes_in[1].name]] + deps)
             for i in range(len(input_nodes_replace)):
                 for n in nodes_op:
                     for j in range(len(n.inputs)):
@@ -226,17 +263,10 @@ def build_hessian_graph(
                             n.inputs[j] = input_nodes_replace[i]
             self.add_nodes(nodes_op + nodes_in[len(input_nodes_replace):])
 
-            if node.inputs[k].name in hess_node:
-                node_cur = hess_node[node.inputs[k].name]
-                print("ADDING ", node_cur, " and ", nodes_out)
-                node_add = BoundAdd(
-                    attr=None, inputs=[node_cur, nodes_out],
-                    output_index=0, options={})
-                node_add.name = f'{nodes_out.name}/add'
-                hess_node[node.inputs[k].name] = node_add
-                self.add_nodes([node_add])
-            else:
-                hess_node[node.inputs[k].name] = nodes_out
+            add_or_accumulate(
+                grad_node, node.inputs[k].name, grad_out, 'grad')
+            add_or_accumulate(
+                hess_node, node.inputs[k].name, hess_out, 'hessian')
             degree[node.inputs[k].name] -= 1
             if degree[node.inputs[k].name] == 0:
                 queue.append(node.inputs[k])
