@@ -1026,6 +1026,16 @@ class BoundSigmoid(BoundTanh):
         grad_extra_nodes = [self.inputs[0]]
         return [(node_grad, grad_input, grad_extra_nodes)]
 
+    def build_hessian_node(self, grad_upstream, hessian_upstream):
+        preact = self.inputs[0].forward_value
+        hessian_node = SigmoidHessian(
+            dim=preact.shape[-1],
+            dtype=preact.dtype,
+            device=preact.device)
+        hessian_input = (
+            grad_upstream, hessian_upstream, self.inputs[0].forward_value)
+        return [(hessian_node, hessian_input, [self.inputs[0]])]
+
 
 class SigmoidGradOp(Function):
     @staticmethod
@@ -1056,6 +1066,22 @@ class SigmoidSecondGradOp(Function):
 class SigmoidSecondGrad(Module):
     def forward(self, g, preact):
         return g * SigmoidSecondGradOp.apply(preact).unsqueeze(1)
+
+
+class SigmoidHessian(Module):
+    def __init__(self, dim=None, dtype=None, device=None):
+        super().__init__()
+        self.register_buffer(
+            'eye', torch.eye(dim, dtype=dtype, device=device))
+
+    def forward(self, grad_last, hessian_last, preact):
+        d1 = SigmoidGradOp.apply(preact)
+        d2 = SigmoidSecondGradOp.apply(preact)
+        grad_input = grad_last * d1.unsqueeze(1)
+        scale = d1.unsqueeze(1).unsqueeze(-1) * d1.unsqueeze(1).unsqueeze(-2)
+        diagonal_term = (grad_last * d2.unsqueeze(1)).unsqueeze(-1) * self.eye
+        hessian_input = hessian_last * scale + diagonal_term
+        return grad_input, hessian_input
 
 
 class BoundSigmoidSecondGrad(BoundActivation):

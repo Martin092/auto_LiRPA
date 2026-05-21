@@ -39,9 +39,11 @@ class SoftplusLyapunovMLP(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(2, hidden_width),
-            nn.Softplus(beta=beta),
+            #nn.Softplus(beta=beta),
+            nn.Sigmoid(),
             nn.Linear(hidden_width, hidden_width),
-            nn.Softplus(beta=beta),
+            nn.Sigmoid(),
+            #nn.Softplus(beta=beta),
             nn.Linear(hidden_width, 1),
         )
 
@@ -382,7 +384,7 @@ def run_benchmark(args):
 def parse_args():
     parser = argparse.ArgumentParser(
         description='2D Ornstein-Uhlenbeck Lyapunov verification benchmark.')
-    parser.add_argument('--alpha', type=float, default=0.5)
+    parser.add_argument('--alpha', type=float, default=0.1)
     parser.add_argument('--sigma', type=float, default=0.1)
     parser.add_argument('--hidden-width', type=int, default=16)
     parser.add_argument('--softplus-beta', type=float, default=5.0)
