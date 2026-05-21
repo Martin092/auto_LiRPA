@@ -103,12 +103,12 @@ def build_jacobian_graph(
             node_grad_ori[node.name] = node.build_gradient_node(grad[node.name])
             # if 'jacobian2' in prefix:
 
-            print(node)
-            print("START")
-            for i in range(len(node_grad_ori[node.name])):
-                print("\t", node_grad_ori[node.name][i])
-            print("END")
-            print()
+            #print(node)
+            #print("START")
+            #for i in range(len(node_grad_ori[node.name])):
+            #    print("\t", node_grad_ori[node.name][i])
+            #print("END")
+            #print()
 
             node_grad_ori[node.name] += [None] * (
                 len(node.inputs) - len(node_grad_ori[node.name]))
@@ -168,7 +168,7 @@ def build_jacobian_graph(
             continue
 
         logger.debug(f'Converting gradient node for {node}')
-        print(node)
+        #print(node)
         for k in range(len(node.inputs)):
             if node_grad_ori[node.name][k] is None:
                 continue
@@ -177,10 +177,10 @@ def build_jacobian_graph(
                 tuple(item.detach()
                       for item in node_grad_ori[node.name][k][1]))
 
-            print("Node op: ", nodes_op)
-            print("Node in: ", nodes_in)
-            print("Node out: ", nodes_out)
-            print()
+            #print("Node op: ", nodes_op)
+            #print("Node in: ", nodes_in)
+            #print("Node out: ", nodes_out)
+            #print()
             logger.debug(f'Converting node operators for: {node}')
             logger.debug(f'Generated backwards ops: {nodes_op}')
             rename_dict = {}

@@ -102,6 +102,12 @@ class BoundReshape(Bound):
         grad_input = (grad_upstream, self.inputs[0].forward_value)
         return [(node_grad, grad_input, [])]
 
+    def build_hessian_node(self, grad_upstream, hessian_upstream):
+        node_hessian = ReshapeHessian()
+        hessian_input = (
+            grad_upstream, hessian_upstream, self.inputs[0].forward_value)
+        return [(node_hessian, hessian_input, [])]
+
 
 class BoundUnsqueeze(Bound):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
@@ -329,6 +335,12 @@ class BoundFlatten(Bound):
         grad_input = (grad_upstream, self.inputs[0].forward_value)
         return [(node_grad, grad_input, [])]
 
+    def build_hessian_node(self, grad_upstream, hessian_upstream):
+        node_hessian = ReshapeHessian()
+        hessian_input = (
+            grad_upstream, hessian_upstream, self.inputs[0].forward_value)
+        return [(node_hessian, hessian_input, [])]
+
 
 class BoundATenUnflatten(BoundReshape):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
@@ -373,6 +385,15 @@ class ReshapeGrad(Module):
             return grad_last.reshape(grad_last.shape[0], *inp.shape[1:])
         else:
             return grad_last.reshape(*grad_last.shape[:2], *inp.shape[1:])
+
+
+class ReshapeHessian(Module):
+    def forward(self, grad_last, hessian_last, inp):
+        input_shape = inp.shape[1:]
+        grad_input = grad_last.reshape(*grad_last.shape[:2], *input_shape)
+        hessian_input = hessian_last.reshape(
+            *hessian_last.shape[:2], *input_shape, *input_shape)
+        return grad_input, hessian_input
 
 
 class BoundTranspose(Bound):

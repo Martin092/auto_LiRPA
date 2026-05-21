@@ -56,7 +56,7 @@ def _expand_hessian(self):
             expand_hessian_node(self, node)
     if self.hessian_node_pairs:
         self._optimize_graph()
-        print("Global input: ", self.global_input)
+        #print("Global input: ", self.global_input)
         self.forward(*self.global_input)
 
 def build_hessian_graph(
@@ -95,6 +95,7 @@ def build_hessian_graph(
     queue = deque([output_node])
     while len(queue) > 0:
         node = queue.popleft()
+        print("Node: ",node)
 
         if node == input_node:
             input_node_found = True
@@ -106,12 +107,12 @@ def build_hessian_graph(
             node_grad_ori[node.name] = node.build_hessian_node(*grad[node.name])
             # if 'jacobian2' in prefix:
 
-            print(node)
-            print("START")
-            for i in range(len(node_grad_ori[node.name])):
-                print("\t", node_grad_ori[node.name][i])
-            print("END")
-            print()
+            #print(node)
+            #print("START")
+            #for i in range(len(node_grad_ori[node.name])):
+            #    print("\t", node_grad_ori[node.name][i])
+            #print("END")
+            #print()
 
             node_grad_ori[node.name] += [None] * (
                 len(node.inputs) - len(node_grad_ori[node.name]))
@@ -174,7 +175,7 @@ def build_hessian_graph(
     def add_or_accumulate(node_map, input_name, new_node, tag):
         if input_name in node_map:
             node_cur = node_map[input_name]
-            print("ADDING ", node_cur, " and ", new_node)
+            #print("ADDING ", node_cur, " and ", new_node)
             node_add = BoundAdd(
                 attr=None, inputs=[node_cur, new_node],
                 output_index=0, options={})
@@ -194,7 +195,6 @@ def build_hessian_graph(
             continue
 
         logger.debug(f'Converting gradient node for {node}')
-        print(node)
         for k in range(len(node.inputs)):
             if node_grad_ori[node.name][k] is None:
                 continue
@@ -202,10 +202,10 @@ def build_hessian_graph(
             # print(node_grad_ori[node.name][k][0])
             # print(tuple(item.detach()
             #           for item in node_grad_ori[node.name][k][1]))
-            print("Looking at ", node_grad_ori[node.name][k][0])
-            print("Passing a tuple: ", tuple(item.detach()
-                      for item in node_grad_ori[node.name][k][1])
-                  )
+            #print("Looking at ", node_grad_ori[node.name][k][0])
+            #print("Passing a tuple: ", tuple(item.detach()
+            #          for item in node_grad_ori[node.name][k][1])
+            #      )
             nodes_op, nodes_in, nodes_out, _ = self._convert_nodes(
                 node_grad_ori[node.name][k][0],
                 tuple(item.detach()

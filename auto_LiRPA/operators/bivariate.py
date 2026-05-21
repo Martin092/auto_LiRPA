@@ -454,6 +454,43 @@ class BoundMul(BoundOptimizableActivation):
         return [(grad_node_0, (grad_upstream, self.inputs[1].forward_value), [self.inputs[1]]),
                 (grad_node_1, (grad_upstream, self.inputs[0].forward_value), [self.inputs[0]])]
 
+    def build_hessian_node(self, grad_upstream, hessian_upstream):
+        if self.inputs[0].perturbed and self.inputs[1].perturbed:
+            raise NotImplementedError(
+                'Hessian propagation for BoundMul with both inputs perturbed '
+                'requires mixed Hessian terms and is not supported yet.')
+
+        if not self.inputs[0].perturbed and not self.inputs[1].perturbed:
+            return [None, None]
+
+        def _shape_with_batch(node):
+            if node.batch_dim != -1:
+                return node.output_shape
+            return torch.Size((1,) + node.output_shape)
+
+        if self.inputs[0].perturbed:
+            if self.inputs[0].output_shape != self.output_shape:
+                raise NotImplementedError(
+                    'Hessian propagation for BoundMul does not support '
+                    'broadcasting the perturbed input yet.')
+            hessian_node = MulHessian(
+                _shape_with_batch(self.inputs[0]),
+                factor_has_batch_dim=self.inputs[1].batch_dim != -1)
+            hessian_input = (
+                grad_upstream, hessian_upstream, self.inputs[1].forward_value)
+            return [(hessian_node, hessian_input, [self.inputs[1]]), None]
+
+        if self.inputs[1].output_shape != self.output_shape:
+            raise NotImplementedError(
+                'Hessian propagation for BoundMul does not support '
+                'broadcasting the perturbed input yet.')
+        hessian_node = MulHessian(
+            _shape_with_batch(self.inputs[1]),
+            factor_has_batch_dim=self.inputs[0].batch_dim != -1)
+        hessian_input = (
+            grad_upstream, hessian_upstream, self.inputs[0].forward_value)
+        return [None, (hessian_node, hessian_input, [self.inputs[0]])]
+
 
 class MulGrad(Module):
     def __init__(self, input_shape):
@@ -468,6 +505,46 @@ class MulGrad(Module):
             # If y is not a constant scalar, its second dimension is for spec
             y = y.unsqueeze(1)
         return reduce_broadcast_dims(grad_last * y, self.input_shape)
+
+
+class MulHessian(Module):
+    def __init__(self, input_shape, factor_has_batch_dim=False):
+        super().__init__()
+        self.input_shape = input_shape
+        self.factor_has_batch_dim = factor_has_batch_dim
+
+    def _factor_for_gradient(self, factor):
+        if factor.ndim == 0:
+            return factor
+        if self.factor_has_batch_dim:
+            return factor.reshape(factor.shape[0], 1, *factor.shape[1:])
+        return factor.reshape(1, 1, *factor.shape)
+
+    def _factor_for_hessian(self, factor):
+        if factor.ndim == 0:
+            return factor, factor
+
+        if self.factor_has_batch_dim:
+            factor_shape = factor.shape[1:]
+            ones = (1,) * len(factor_shape)
+            row_shape = (factor.shape[0], 1, *factor_shape, *ones)
+            col_shape = (factor.shape[0], 1, *ones, *factor_shape)
+        else:
+            factor_shape = factor.shape
+            ones = (1,) * len(factor_shape)
+            row_shape = (1, 1, *factor_shape, *ones)
+            col_shape = (1, 1, *ones, *factor_shape)
+        return factor.reshape(row_shape), factor.reshape(col_shape)
+
+    def forward(self, grad_last, hessian_last, factor):
+        factor = factor.to(grad_last)
+        grad_factor = self._factor_for_gradient(factor)
+        grad_input = reduce_broadcast_dims(
+            grad_last * grad_factor, self.input_shape)
+
+        row_factor, col_factor = self._factor_for_hessian(factor)
+        hessian_input = hessian_last * row_factor * col_factor
+        return grad_input, hessian_input
 
 
 class BoundDiv(Bound):
