@@ -35,6 +35,32 @@ def _output_hessians(model, x):
         x.shape[0], -1, *x.shape[1:], *x.shape[1:])
 
 
+def _make_grid(x0, eps, steps):
+    return [
+        torch.linspace(
+            x0[0, i] - eps, x0[0, i] + eps, steps=steps, dtype=torch.double)
+        for i in range(x0.numel())
+    ]
+
+
+class _HessianWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        return DirectHessianOP.apply(self.model(x), x)
+
+
+class _DoubleJacobianWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        return DoubleJacobianOP.apply(self.model(x), x)
+
+
 def test_native_linear_hessian_bounds_are_zero():
     model = nn.Linear(3, 2).double()
     x0 = torch.zeros(1, 3, dtype=torch.double)
@@ -301,7 +327,9 @@ def test_native_direct_sigmoid_hessian_alpha_crown_piecewise_bounds():
         assert torch.all(hessian <= upper + 1e-10)
 
 
-def test_native_sigmoid_linear_network_hessian_contains_sampled_points():
+@pytest.mark.parametrize("wrapper_cls", [_HessianWrapper, _DoubleJacobianWrapper])
+@pytest.mark.parametrize("method", ['IBP', 'backward'])
+def test_sigmoid_linear_network_soundness(wrapper_cls, method):
     torch.manual_seed(5)
     model = nn.Sequential(
         nn.Linear(2, 3),
@@ -309,23 +337,17 @@ def test_native_sigmoid_linear_network_hessian_contains_sampled_points():
         nn.Linear(3, 1),
     ).double()
     x0 = torch.tensor([[0.1, -0.2]], dtype=torch.double)
-    bounded = BoundedModule(_HessianWrapper(model), x0)
+    bounded = BoundedModule(wrapper_cls(model), x0)
 
     eps = 0.05
     x = BoundedTensor(
         x0, PerturbationLpNorm(norm=float('inf'), eps=eps))
-    grids = [
-        torch.linspace(
-            x0[0, i] - eps, x0[0, i] + eps, steps=9, dtype=torch.double)
-        for i in range(x0.numel())
-    ]
-    for method in ['IBP', 'backward']:
-        lower, upper = bounded.compute_hessian_bounds(x, method=method)
-        for point in itertools.product(*grids):
-            hessian = _scalar_hessian(
-                model, torch.tensor([point], dtype=torch.double))
-            assert torch.all(hessian >= lower[0, 0] - 1e-10)
-            assert torch.all(hessian <= upper[0, 0] + 1e-10)
+    lower, upper = bounded.compute_hessian_bounds(x, method=method)
+    for point in itertools.product(*_make_grid(x0, eps, 9)):
+        hessian = _scalar_hessian(
+            model, torch.tensor([point], dtype=torch.double))
+        assert torch.all(hessian >= lower[0, 0] - 1e-10)
+        assert torch.all(hessian <= upper[0, 0] + 1e-10)
 
 
 def test_native_sigmoid_linear_network_alpha_crown_piecewise_hessian_contains_sampled_points():
@@ -367,7 +389,9 @@ def test_native_sigmoid_linear_network_alpha_crown_piecewise_hessian_contains_sa
         assert torch.all(hessian <= upper[0, 0] + 1e-10)
 
 
-def test_native_softplus_linear_network_hessian_contains_sampled_points():
+@pytest.mark.parametrize("wrapper_cls", [_HessianWrapper, _DoubleJacobianWrapper])
+@pytest.mark.parametrize("method", ['IBP', 'backward'])
+def test_softplus_linear_network_soundness(wrapper_cls, method):
     torch.manual_seed(1)
     model = nn.Sequential(
         nn.Linear(2, 3),
@@ -375,127 +399,42 @@ def test_native_softplus_linear_network_hessian_contains_sampled_points():
         nn.Linear(3, 1),
     ).double()
     x0 = torch.tensor([[0.1, -0.2]], dtype=torch.double)
-    bounded = BoundedModule(_HessianWrapper(model), x0)
+    bounded = BoundedModule(wrapper_cls(model), x0)
 
     eps = 0.05
     x = BoundedTensor(
         x0, PerturbationLpNorm(norm=float('inf'), eps=eps))
-    lower, upper = bounded.compute_hessian_bounds(x)
+    lower, upper = bounded.compute_hessian_bounds(x, method=method)
 
-    print("Lower: ", lower)
-    print("Upper: ", upper)
-
-    grids = [
-        torch.linspace(
-            x0[0, i] - eps, x0[0, i] + eps, steps=9, dtype=torch.double)
-        for i in range(x0.numel())
-    ]
-    for point in itertools.product(*grids):
+    for point in itertools.product(*_make_grid(x0, eps, 9)):
         hessian = _scalar_hessian(
             model, torch.tensor([point], dtype=torch.double))
         assert torch.all(hessian >= lower[0, 0] - 1e-10)
         assert torch.all(hessian <= upper[0, 0] + 1e-10)
 
 
-def test_native_stacked_softplus_hessian_contains_sampled_points():
+@pytest.mark.parametrize("wrapper_cls", [_HessianWrapper, _DoubleJacobianWrapper])
+def test_stacked_softplus_soundness(wrapper_cls):
     torch.manual_seed(3)
     model = nn.Sequential(
         nn.Linear(2, 2),
         nn.Softplus(),
+        nn.Linear(2, 2),
         nn.Softplus(),
-        nn.Linear(2, 1),
     ).double()
     x0 = torch.tensor([[0.05, -0.1]], dtype=torch.double)
-    bounded = BoundedModule(_HessianWrapper(model), x0)
+    bounded = BoundedModule(wrapper_cls(model), x0)
 
-    forward_hessian = bounded(x0)
-    expected_forward = _scalar_hessian(model, x0)
-    assert torch.allclose(forward_hessian[0, 0], expected_forward)
+    if wrapper_cls is _HessianWrapper:
+        forward_hessian = bounded(x0)
+        expected_forward = _scalar_hessian(model, x0)
+        assert torch.allclose(forward_hessian[0, 0], expected_forward)
 
     eps = 0.3
     x = BoundedTensor(
         x0, PerturbationLpNorm(norm=float('inf'), eps=eps))
     lower, upper = bounded.compute_hessian_bounds(x)
-    grids = [
-        torch.linspace(
-            x0[0, i] - eps, x0[0, i] + eps, steps=7, dtype=torch.double)
-        for i in range(x0.numel())
-    ]
-    #print("Bounds: ", lower, upper)
-    for point in itertools.product(*grids):
-        hessian = _scalar_hessian(
-            model, torch.tensor([point], dtype=torch.double))
-        #print("hessian: ", hessian)
-        assert torch.all(hessian >= lower[0, 0] - 1e-10)
-        assert torch.all(hessian <= upper[0, 0] + 1e-10)
-
-
-class _HessianWrapper(nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-
-    def forward(self, x):
-        return DirectHessianOP.apply(self.model(x), x)
-
-
-class _DoubleJacobianWrapper(nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-
-    def forward(self, x):
-        return DoubleJacobianOP.apply(self.model(x), x)
-
-
-def test_double_jacobian_softplus_linear_network_soundness():
-    torch.manual_seed(5)
-    model = nn.Sequential(
-        nn.Linear(2, 3),
-        nn.Softplus(),
-        nn.Linear(3, 1),
-    ).double()
-    x0 = torch.tensor([[0.1, -0.2]], dtype=torch.double)
-    bounded = BoundedModule(_DoubleJacobianWrapper(model), x0)
-
-    eps = 0.05
-    x = BoundedTensor(
-        x0, PerturbationLpNorm(norm=float('inf'), eps=eps))
-    grids = [
-        torch.linspace(
-            x0[0, i] - eps, x0[0, i] + eps, steps=9, dtype=torch.double)
-        for i in range(x0.numel())
-    ]
-    for method in ['IBP', 'backward']:
-        lower, upper = bounded.compute_hessian_bounds(x, method=method)
-        for point in itertools.product(*grids):
-            hessian = _scalar_hessian(
-                model, torch.tensor([point], dtype=torch.double))
-            assert torch.all(hessian >= lower[0, 0] - 1e-10)
-            assert torch.all(hessian <= upper[0, 0] + 1e-10)
-
-
-def test_double_jacobian_stacked_softplus_soundness():
-    torch.manual_seed(3)
-    model = nn.Sequential(
-        nn.Linear(2, 2),
-        nn.Softplus(),
-        nn.Softplus(),
-        nn.Linear(2, 1),
-    ).double()
-    x0 = torch.tensor([[0.05, -0.1]], dtype=torch.double)
-    bounded = BoundedModule(_DoubleJacobianWrapper(model), x0)
-
-    eps = 0.3
-    x = BoundedTensor(
-        x0, PerturbationLpNorm(norm=float('inf'), eps=eps))
-    grids = [
-        torch.linspace(
-            x0[0, i] - eps, x0[0, i] + eps, steps=7, dtype=torch.double)
-        for i in range(x0.numel())
-    ]
-    lower, upper = bounded.compute_hessian_bounds(x)
-    for point in itertools.product(*grids):
+    for point in itertools.product(*_make_grid(x0, eps, 7)):
         hessian = _scalar_hessian(
             model, torch.tensor([point], dtype=torch.double))
         assert torch.all(hessian >= lower[0, 0] - 1e-10)
