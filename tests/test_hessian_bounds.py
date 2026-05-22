@@ -6,6 +6,8 @@ import torch.nn as nn
 
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.hessian import HessianOP
+from auto_LiRPA.operators.s_shaped import (
+    BoundSigmoidSecondGrad, d2sigmoid, d3sigmoid)
 from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.utils import logger
 
@@ -109,6 +111,195 @@ def test_native_direct_sigmoid_hessian_bounds():
             assert torch.all(hessian <= upper + 1e-10)
 
 
+def test_sigmoid_second_grad_precompute_masks_and_symmetry():
+    op = BoundSigmoidSecondGrad(attr={'device': torch.device('cpu')})
+    op.precompute_relaxation(x_limit=5)
+
+    x = torch.tensor([[-3., -1., 1., 3.]])
+    upper_d_lower, upper_d_upper, upper_has_d_lower, upper_has_d_upper = (
+        op.retrieve_from_precompute(x))
+    lower_d_lower, lower_d_upper, lower_has_d_lower, lower_has_d_upper = (
+        op.retrieve_from_precompute(x, flip=True))
+
+    assert torch.equal(
+        upper_has_d_lower, torch.tensor([[False, True, False, True]]))
+    assert torch.equal(
+        upper_has_d_upper, torch.tensor([[False, False, True, True]]))
+    assert torch.equal(
+        lower_has_d_lower, torch.tensor([[True, True, False, False]]))
+    assert torch.equal(
+        lower_has_d_upper, torch.tensor([[True, False, True, False]]))
+
+    # Lower-endpoint thresholds are recovered by odd symmetry, which negates
+    # tangent points and swaps lower/upper roles.
+    assert torch.allclose(lower_d_lower[:, 0], -upper_d_upper[:, 3])
+    assert torch.allclose(lower_d_upper[:, 0], -upper_d_lower[:, 3])
+    assert torch.allclose(lower_d_lower[:, 1], -upper_d_upper[:, 2])
+    assert torch.allclose(lower_d_upper[:, 2], -upper_d_lower[:, 1])
+
+    # The lower-endpoint view exposes the positive-branch lower tangents for
+    # negative endpoints that are not part of the upper-endpoint table itself.
+    assert torch.all(lower_d_lower[:, :2] > 0)
+    assert torch.all(
+        lower_d_lower[:, :2] <= op.extreme_point + 1e-6)
+
+    upper_lower_line_at_neg_middle = (
+        d3sigmoid(upper_d_lower[:, 1]) * (x[:, 1] - upper_d_lower[:, 1])
+        + d2sigmoid(upper_d_lower[:, 1]))
+    upper_upper_line_at_pos_middle = (
+        d3sigmoid(upper_d_upper[:, 2]) * (x[:, 2] - upper_d_upper[:, 2])
+        + d2sigmoid(upper_d_upper[:, 2]))
+    upper_lower_line_at_pos_tail = (
+        d3sigmoid(upper_d_lower[:, 3]) * (x[:, 3] - upper_d_lower[:, 3])
+        + d2sigmoid(upper_d_lower[:, 3]))
+    lower_lower_line_at_neg_tail = (
+        d3sigmoid(lower_d_lower[:, 0]) * (x[:, 0] - lower_d_lower[:, 0])
+        + d2sigmoid(lower_d_lower[:, 0]))
+    lower_upper_line_at_neg_tail = (
+        d3sigmoid(lower_d_upper[:, 0]) * (x[:, 0] - lower_d_upper[:, 0])
+        + d2sigmoid(lower_d_upper[:, 0]))
+
+    assert torch.all(
+        upper_lower_line_at_neg_middle <= d2sigmoid(x[:, 1]) + 1e-6)
+    assert torch.all(
+        upper_upper_line_at_pos_middle >= d2sigmoid(x[:, 2]) - 1e-6)
+    assert torch.all(
+        upper_lower_line_at_pos_tail <= d2sigmoid(x[:, 3]) + 1e-6)
+    assert torch.all(
+        lower_lower_line_at_neg_tail <= d2sigmoid(x[:, 0]) + 1e-6)
+    assert torch.all(
+        lower_upper_line_at_neg_tail >= d2sigmoid(x[:, 0]) - 1e-6)
+
+
+def test_sigmoid_second_grad_piecewise_case_relaxations_are_sound():
+    """Representative intervals from the curvature/crossing case table."""
+    op = BoundSigmoidSecondGrad(
+        attr={'device': torch.device('cpu')},
+        options={'sigmoid_second_grad_relaxation': 'piecewise'})
+
+    lower = torch.tensor([
+        -4., -2., 0.2, 2.5,   # fully convex / concave regions
+        -4., -1., -1., 0.5,   # lower-bound crossing cases
+        -4., -1., -4., 1.5,   # upper-bound crossing cases
+    ])
+    upper = torch.tensor([
+        -3., -1., 1.0, 4.0,
+        -1., 0.5, 3.0, 3.0,
+        -1., 0.5, 1.0, 3.0,
+    ])
+
+    class SimpleBoundedInput:
+        def __init__(self, l, u):
+            self.lower = l
+            self.upper = u
+
+    x = SimpleBoundedInput(lower, upper)
+    op.init_linear_relaxation(x)
+    op.bound_relax(x, init=False)
+
+    grid_t = torch.linspace(0., 1., steps=257).unsqueeze(1)
+    grid = lower.unsqueeze(0) + grid_t * (upper - lower).unsqueeze(0)
+    y = d2sigmoid(grid)
+    lower_line = op.lw.unsqueeze(0) * grid + op.lb.unsqueeze(0)
+    upper_line = op.uw.unsqueeze(0) * grid + op.ub.unsqueeze(0)
+
+    assert torch.all(lower_line <= y + 1e-5)
+    assert torch.all(upper_line >= y - 1e-5)
+    # These intervals are chosen so that each representative case should get
+    # an actual linear relaxation, not merely retain the initial IBP constant.
+    assert torch.all(op.lw.abs() > 1e-6)
+    assert torch.all(op.uw.abs() > 1e-6)
+
+
+def test_sigmoid_second_grad_piecewise_relaxations_cover_boundary_grid():
+    """Check soundness across intervals around all curvature breakpoints."""
+    op = BoundSigmoidSecondGrad(
+        attr={'device': torch.device('cpu')},
+        options={'sigmoid_second_grad_relaxation': 'piecewise'})
+    endpoints = torch.tensor([
+        -5., -3., -2.3, -2.2, -1., -0.1,
+        0., 0.1, 1., 2.2, 2.3, 3., 5.,
+    ])
+    lower, upper = zip(*[
+        (endpoints[i], endpoints[j])
+        for i in range(endpoints.numel())
+        for j in range(i + 1, endpoints.numel())
+    ])
+    lower = torch.stack(lower)
+    upper = torch.stack(upper)
+
+    class SimpleBoundedInput:
+        def __init__(self, l, u):
+            self.lower = l
+            self.upper = u
+
+    x = SimpleBoundedInput(lower, upper)
+    op.init_linear_relaxation(x)
+    op.bound_relax(x, init=False)
+
+    grid_t = torch.linspace(0., 1., steps=257).unsqueeze(1)
+    grid = lower.unsqueeze(0) + grid_t * (upper - lower).unsqueeze(0)
+    y = d2sigmoid(grid)
+    lower_line = op.lw.unsqueeze(0) * grid + op.lb.unsqueeze(0)
+    upper_line = op.uw.unsqueeze(0) * grid + op.ub.unsqueeze(0)
+
+    assert torch.all(lower_line <= y + 1e-5)
+    assert torch.all(upper_line >= y - 1e-5)
+
+
+def test_sigmoid_second_grad_tangent_relaxation_is_fixed():
+    tangent = BoundSigmoidSecondGrad(
+        attr={'device': torch.device('cpu')},
+        options={'sigmoid_second_grad_relaxation': 'tangent'})
+    same_slope = BoundSigmoidSecondGrad(
+        attr={'device': torch.device('cpu')},
+        options={'sigmoid_second_grad_relaxation': 'same-slope'})
+    piecewise = BoundSigmoidSecondGrad(
+        attr={'device': torch.device('cpu')},
+        options={'sigmoid_second_grad_relaxation': 'piecewise'})
+
+    assert tangent.sigmoid_second_grad_relaxation == 'tangent'
+    assert same_slope.sigmoid_second_grad_relaxation == 'tangent'
+    assert not tangent.optimizable
+    assert not same_slope.optimizable
+    assert piecewise.optimizable
+
+
+def test_native_direct_sigmoid_hessian_alpha_crown_piecewise_bounds():
+    """Piecewise sigmoid'' relaxations should be optimizable and sound."""
+    model = nn.Sigmoid().double()
+    # Exercise intervals around each outer inflection and around zero.
+    x0 = torch.tensor([[-2.3, 0.0, 2.3]], dtype=torch.double)
+    bounded = BoundedModule(
+        _HessianWrapper(model), x0,
+        bound_opts={
+            'optimize_bound_args': {'iteration': 2},
+            'sigmoid_second_grad_relaxation': 'piecewise',
+        })
+
+    eps = 0.2
+    x = BoundedTensor(
+        x0, PerturbationLpNorm(norm=float('inf'), eps=eps))
+    lower, upper = bounded.compute_hessian_bounds(x, method='alpha-CROWN')
+
+    second_grad_nodes = [
+        node for node in bounded.nodes()
+        if type(node).__name__ == 'BoundSigmoidSecondGrad']
+    assert second_grad_nodes
+    assert any(node.alpha for node in second_grad_nodes)
+
+    grids = [
+        torch.linspace(
+            x0[0, i] - eps, x0[0, i] + eps, steps=9, dtype=torch.double)
+        for i in range(x0.numel())
+    ]
+    for point in itertools.product(*grids):
+        hessian = _output_hessians(
+            model, torch.tensor([point], dtype=torch.double))
+        assert torch.all(hessian >= lower - 1e-10)
+        assert torch.all(hessian <= upper + 1e-10)
+
+
 def test_native_sigmoid_linear_network_hessian_contains_sampled_points():
     torch.manual_seed(5)
     model = nn.Sequential(
@@ -134,6 +325,45 @@ def test_native_sigmoid_linear_network_hessian_contains_sampled_points():
                 model, torch.tensor([point], dtype=torch.double))
             assert torch.all(hessian >= lower[0, 0] - 1e-10)
             assert torch.all(hessian <= upper[0, 0] + 1e-10)
+
+
+def test_native_sigmoid_linear_network_alpha_crown_piecewise_hessian_contains_sampled_points():
+    """Optimized sigmoid'' bounds should stay sound inside a sigmoid network."""
+    torch.manual_seed(5)
+    model = nn.Sequential(
+        nn.Linear(2, 3),
+        nn.Sigmoid(),
+        nn.Linear(3, 1),
+    ).double()
+    x0 = torch.tensor([[0.1, -0.2]], dtype=torch.double)
+    bounded = BoundedModule(
+        _HessianWrapper(model), x0,
+        bound_opts={
+            'optimize_bound_args': {'iteration': 2},
+            'sigmoid_second_grad_relaxation': 'piecewise',
+        })
+
+    eps = 0.05
+    x = BoundedTensor(
+        x0, PerturbationLpNorm(norm=float('inf'), eps=eps))
+    lower, upper = bounded.compute_hessian_bounds(x, method='alpha-CROWN')
+
+    second_grad_nodes = [
+        node for node in bounded.nodes()
+        if type(node).__name__ == 'BoundSigmoidSecondGrad']
+    assert second_grad_nodes
+    assert any(node.alpha for node in second_grad_nodes)
+
+    grids = [
+        torch.linspace(
+            x0[0, i] - eps, x0[0, i] + eps, steps=9, dtype=torch.double)
+        for i in range(x0.numel())
+    ]
+    for point in itertools.product(*grids):
+        hessian = _scalar_hessian(
+            model, torch.tensor([point], dtype=torch.double))
+        assert torch.all(hessian >= lower[0, 0] - 1e-10)
+        assert torch.all(hessian <= upper[0, 0] + 1e-10)
 
 
 def test_native_softplus_linear_network_hessian_contains_sampled_points():

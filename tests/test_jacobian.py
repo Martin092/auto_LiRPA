@@ -1,12 +1,14 @@
 # pylint: disable=wrong-import-position
 """Test Jacobian bounds."""
 import sys
+from pathlib import Path
 import torch
 import torch.nn as nn
 
-sys.path.append('../examples/vision')
+sys.path.append(str(Path(__file__).resolve().parents[1] / 'examples' / 'vision'))
 from jacobian import compute_jacobians
-from auto_LiRPA import BoundedModule
+from auto_LiRPA import BoundedModule, BoundedTensor
+from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.utils import Flatten
 from auto_LiRPA.jacobian import JacobianOP
 from testcase import TestCase, DEFAULT_DEVICE, DEFAULT_DTYPE
@@ -50,6 +52,42 @@ class TestJacobian(TestCase):
         x0 = torch.randn(1, 5, device=self.default_device, dtype=self.default_dtype)
         BoundedModule(concatmodel, x0)
         print('Concat JacobianOP test passed.')
+
+    def test_direct_optimized_jacobian_bounds(self):
+        """Direct Jacobian-graph optimization should be sound and runnable."""
+
+        class NestedSigmoidJacobian(nn.Module):
+            def forward(self, x):
+                y = torch.sigmoid(torch.sigmoid(x))
+                return JacobianOP.apply(y, x)
+
+        model = NestedSigmoidJacobian().to(
+            device=self.default_device, dtype=self.default_dtype)
+        x0 = torch.tensor([[0.1]], device=self.default_device,
+                          dtype=self.default_dtype)
+        bounded = BoundedModule(
+            model, x0,
+            bound_opts={'optimize_bound_args': {'iteration': 2}})
+        eps = 0.2
+        x = BoundedTensor(
+            x0, PerturbationLpNorm(norm=float('inf'), eps=eps))
+
+        lower, upper = bounded.compute_jacobian_bounds(
+            x, optimize_target='jacobian')
+
+        for point in torch.linspace(
+                x0.item() - eps, x0.item() + eps, steps=9,
+                device=self.default_device, dtype=self.default_dtype):
+            sample = point.reshape_as(x0).detach().requires_grad_(True)
+            output = torch.sigmoid(torch.sigmoid(sample))
+            jacobian = torch.autograd.grad(output.sum(), sample)[0]
+            jacobian = jacobian.reshape_as(lower)
+            assert torch.all(jacobian >= lower - 1e-5)
+            assert torch.all(jacobian <= upper + 1e-5)
+
+        # The historical primal-optimization path should remain usable after
+        # directly optimizing the expanded Jacobian graph.
+        bounded.compute_jacobian_bounds(x, optimize_target='primal')
 
 
 if __name__ == '__main__':

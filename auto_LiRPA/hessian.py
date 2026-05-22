@@ -53,7 +53,7 @@ def _expand_hessian(self):
         # print(node)
         if isinstance(node, BoundHessianOP):
             self.hessian_node_pairs.append((node.inputs[0], node.inputs[1]))
-            expand_hessian_node(self, node)
+            expand_direct_hessian_node(self, node)
     if self.hessian_node_pairs:
         self._optimize_graph()
         #print("Global input: ", self.global_input)
@@ -273,38 +273,38 @@ def build_hessian_graph(
 
     raise RuntimeError('Input node not found')
 
-def expand_hessian_node(self, hessian_node):
-    logger.info(f'Expanding Jacobian node {hessian_node}')
-
+def expand_direct_hessian_node(self, hessian_node):
+    """Expand Hessian node using direct hessian propagation method."""
+    logger.info(f'Expanding Direct Hessian node {hessian_node}')
     output_node = hessian_node.inputs[0]
     input_node = hessian_node.inputs[1]
     replacement_node = build_hessian_graph(self, output_node, input_node)
     self.replace_node(hessian_node, replacement_node)
 
 
-# def expand_hessian_node(self, hessian_node):
-#     output_node = hessian_node.inputs[0]
-#     input_node = hessian_node.inputs[1]
-#     prefix = f'/hessian{output_node.name}{input_node.name}'
-#
-#     logger.info(f'Expanding Hessian node {hessian_node.name}')
-#     jacobian_node = build_jacobian_graph(
-#         self, output_node, input_node,
-#         prefix=f'{prefix}/jacobian1', allow_unused=True)
-#     # The second Jacobian expansion needs shapes for the first Jacobian graph.
-#     self.forward(*self.global_input, final_node_name=jacobian_node.name)
-#     logger.debug('Hessian Jacobian expansion checkpoint')
-#     jacobian_of_jacobian_node = build_jacobian_graph(
-#         self, jacobian_node, input_node,
-#         prefix=f'{prefix}/jacobian2', allow_unused=True)
-#     hessian_expanded_node = BoundHessianOutputReshape(
-#         attr={'order': 2},
-#         inputs=[jacobian_of_jacobian_node, output_node, input_node],
-#         output_index=0,
-#         options=self.bound_opts)
-#     hessian_expanded_node.name = f'{prefix}/hessian_output'
-#     self.add_nodes([hessian_expanded_node])
-#     self.replace_node(hessian_node, hessian_expanded_node)
+def expand_double_jacobian_node(self, hessian_node):
+    """Expand Hessian node using double Jacobian method (Jacobian of Jacobian)."""
+    output_node = hessian_node.inputs[0]
+    input_node = hessian_node.inputs[1]
+    prefix = f'/hessian{output_node.name}{input_node.name}'
+
+    logger.info(f'Expanding Double Jacobian Hessian node {hessian_node.name}')
+    jacobian_node = build_jacobian_graph(
+        self, output_node, input_node,
+        prefix=f'{prefix}/jacobian1', allow_unused=True)
+    self.forward(*self.global_input, final_node_name=jacobian_node.name)
+    logger.debug('Hessian Jacobian expansion checkpoint')
+    jacobian_of_jacobian_node = build_jacobian_graph(
+        self, jacobian_node, input_node,
+        prefix=f'{prefix}/jacobian2', allow_unused=True)
+    hessian_expanded_node = BoundHessianOutputReshape(
+        attr={'order': 2},
+        inputs=[jacobian_of_jacobian_node, output_node, input_node],
+        output_index=0,
+        options=self.bound_opts)
+    hessian_expanded_node.name = f'{prefix}/hessian_output'
+    self.add_nodes([hessian_expanded_node])
+    self.replace_node(hessian_node, hessian_expanded_node)
 
 
 __all__ = [
