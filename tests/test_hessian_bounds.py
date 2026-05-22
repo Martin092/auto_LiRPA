@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from auto_LiRPA import BoundedModule, BoundedTensor
-from auto_LiRPA.hessian import HessianOP
+from auto_LiRPA.hessian import DirectHessianOP
 from auto_LiRPA.operators.s_shaped import (
     BoundSigmoidSecondGrad, d2sigmoid, d3sigmoid)
 from auto_LiRPA.perturbations import PerturbationLpNorm
@@ -435,4 +435,4 @@ class _HessianWrapper(nn.Module):
         self.model = model
 
     def forward(self, x):
-        return HessianOP.apply(self.model(x), x)
+        return DirectHessianOP.apply(self.model(x), x)

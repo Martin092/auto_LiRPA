@@ -15,7 +15,7 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from auto_LiRPA import BoundedModule, BoundedTensor
-from auto_LiRPA.hessian import HessianOP
+from auto_LiRPA.hessian import DirectHessianOP
 from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.bound_ops import JacobianOP
 
@@ -25,7 +25,7 @@ class HessianWrapper(nn.Module):
         self.model = model
 
     def forward(self, state):
-        return HessianOP.apply(self.model(state), state)
+        return DirectHessianOP.apply(self.model(state), state)
 
 class JacobianWrapper(nn.Module):
     def __init__(self, model):

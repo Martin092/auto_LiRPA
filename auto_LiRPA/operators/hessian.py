@@ -22,10 +22,11 @@ from .base import Bound
 from ..utils import prod
 
 
-class HessianOP(torch.autograd.Function):
+class DirectHessianOP(torch.autograd.Function):
+    """Direct hessian computation via per-operator hessian propagation."""
     @staticmethod
     def symbolic(g, output, input):
-        return g.op('grad::hessian', output, input).setType(output.type())
+        return g.op('grad::direct_hessian', output, input).setType(output.type())
 
     @staticmethod
     def forward(ctx, output, input):
@@ -34,6 +35,22 @@ class HessianOP(torch.autograd.Function):
         return output.new_zeros(
             output.shape[0], output_.shape[-1],
             *input_shape, *input_shape)
+
+
+class DoubleJacobianOP(torch.autograd.Function):
+    """Double jacobian hessian computation (jacobian of jacobian)."""
+    @staticmethod
+    def symbolic(g, output, input):
+        return g.op('grad::double_jacobian', output, input).setType(output.type())
+
+    @staticmethod
+    def forward(ctx, output, input):
+        output_ = output.flatten(1)
+        input_shape = tuple(input.shape[1:])
+        return output.new_zeros(
+            output.shape[0], output_.shape[-1],
+            *input_shape, *input_shape)
+
 
 class BoundHessianInit(Bound):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
@@ -45,12 +62,22 @@ class BoundHessianInit(Bound):
         return x.new_zeros(
             x.shape[0], *y.shape[1:], *x.shape[1:], *x.shape[1:])
 
-class BoundHessianOP(Bound):
+class BoundDirectHessianOP(Bound):
+    """Bound propagation for direct hessian via per-operator hessian propagation."""
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
 
     def forward(self, output, input):
-        return HessianOP.apply(output, input)
+        return DirectHessianOP.apply(output, input)
+
+
+class BoundDoubleJacobianOP(Bound):
+    """Bound propagation for double jacobian hessian (jacobian of jacobian)."""
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+
+    def forward(self, output, input):
+        return DoubleJacobianOP.apply(output, input)
 
 
 class BoundHessianOutputReshape(Bound):

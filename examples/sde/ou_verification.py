@@ -31,7 +31,7 @@ import torch.nn as nn
 
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.bound_ops import JacobianOP
-from auto_LiRPA.hessian import HessianOP
+from auto_LiRPA.hessian import DirectHessianOP
 from auto_LiRPA.perturbations import PerturbationLpNorm
 
 
@@ -71,7 +71,7 @@ class HessianWrapper(nn.Module):
         self.model = model
 
     def forward(self, state):
-        return HessianOP.apply(self.model(state), state)
+        return DirectHessianOP.apply(self.model(state), state)
 
 
 class HessianTraceWrapper(nn.Module):
@@ -80,7 +80,7 @@ class HessianTraceWrapper(nn.Module):
         self.model = model
 
     def forward(self, state):
-        hessian = HessianOP.apply(self.model(state), state)
+        hessian = DirectHessianOP.apply(self.model(state), state)
         return hessian[:, :, 0, 0] + hessian[:, :, 1, 1]
 
 
@@ -103,7 +103,7 @@ class OUGeneratorGapWrapper(nn.Module):
     def forward(self, state):
         value = self.model(state)
         jacobian = JacobianOP.apply(value, state)
-        hessian = HessianOP.apply(value, state)
+        hessian = DirectHessianOP.apply(value, state)
 
         drift = -(
             jacobian[:, :, 0] * state[:, 0:1]

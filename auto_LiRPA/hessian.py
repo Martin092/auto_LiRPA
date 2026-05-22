@@ -1,20 +1,24 @@
 """Hessian bounds for native ``BoundedModule`` graphs.
 
-``HessianOP`` marks a Hessian request in the parsed graph. During
-``BoundedModule`` construction, the marker is expanded as a Jacobian of a
-Jacobian, reusing the existing Jacobian graph construction machinery.
+Two methods are available:
+1. DirectHessianOP: Direct hessian computation via per-operator hessian propagation
+2. DoubleJacobianOP: Hessian via jacobian of jacobian (nested jacobian expansion)
 
 Native ``BoundedModule`` usage:
 
     class HessianWrapper(nn.Module):
-        def __init__(self, model):
+        def __init__(self, model, method='direct'):
             super().__init__()
             self.model = model
+            self.method = method
 
         def forward(self, x):
-            return HessianOP.apply(self.model(x), x)
+            if self.method == 'direct':
+                return DirectHessianOP.apply(self.model(x), x)
+            else:
+                return DoubleJacobianOP.apply(self.model(x), x)
 
-    bounded_model = BoundedModule(HessianWrapper(model), x0)
+    bounded_model = BoundedModule(HessianWrapper(model, method='direct'), x0)
     lower, upper = bounded_model.compute_hessian_bounds(x)
 """
 from collections import deque
@@ -22,7 +26,7 @@ from collections import deque
 import torch
 
 from auto_LiRPA.bound_ops import (
-    BoundHessianOP, BoundHessianOutputReshape, HessianOP)
+    BoundDirectHessianOP, BoundDoubleJacobianOP, BoundHessianOutputReshape, DirectHessianOP, DoubleJacobianOP)
 from auto_LiRPA.jacobian import build_jacobian_graph
 from auto_LiRPA.operators import BoundInput, BoundJacobianZero, BoundJacobianInit, BoundAdd, BoundHessianInit
 from auto_LiRPA.utils import logger, prod
@@ -35,7 +39,7 @@ def compute_hessian_bounds(
     bound_upper: bool = True,
     method: str = 'backward',
 ):
-    """Compute IBP or backward bound propagation bounds for a Hessian graph expanded from ``HessianOP``."""
+    """Compute IBP or backward bound propagation bounds for a Hessian graph expanded from DirectHessianOP or DoubleJacobianOP."""
 
     if isinstance(x, torch.Tensor):
         x = (x,)
@@ -49,14 +53,14 @@ def compute_hessian_bounds(
 def _expand_hessian(self):
     self.hessian_node_pairs = []
     for node in list(self.nodes()):
-        # print()
-        # print(node)
-        if isinstance(node, BoundHessianOP):
+        if isinstance(node, BoundDirectHessianOP):
             self.hessian_node_pairs.append((node.inputs[0], node.inputs[1]))
             expand_direct_hessian_node(self, node)
+        elif isinstance(node, BoundDoubleJacobianOP):
+            self.hessian_node_pairs.append((node.inputs[0], node.inputs[1]))
+            expand_double_jacobian_node(self, node)
     if self.hessian_node_pairs:
         self._optimize_graph()
-        #print("Global input: ", self.global_input)
         self.forward(*self.global_input)
 
 def build_hessian_graph(
@@ -308,6 +312,7 @@ def expand_double_jacobian_node(self, hessian_node):
 
 
 __all__ = [
-    'HessianOP',
+    'DirectHessianOP',
+    'DoubleJacobianOP',
     'compute_hessian_bounds',
 ]
