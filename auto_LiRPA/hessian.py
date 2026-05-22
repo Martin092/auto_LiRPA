@@ -251,7 +251,7 @@ def build_hessian_graph(
 
 def expand_direct_hessian_node(self, hessian_node):
     """Expand Hessian node using direct hessian propagation method."""
-    logger.info(f'Expanding Direct Hessian node {hessian_node}')
+    logger.debug(f'Expanding Direct Hessian node {hessian_node}')
     output_node = hessian_node.inputs[0]
     input_node = hessian_node.inputs[1]
     replacement_node = build_hessian_graph(self, output_node, input_node)
@@ -264,7 +264,7 @@ def expand_double_jacobian_node(self, hessian_node):
     input_node = hessian_node.inputs[1]
     prefix = f'/hessian{output_node.name}{input_node.name}'
 
-    logger.info(f'Expanding Double Jacobian Hessian node {hessian_node.name}')
+    logger.debug(f'Expanding Double Jacobian Hessian node {hessian_node.name}')
     jacobian_node = build_jacobian_graph(
         self, output_node, input_node,
         prefix=f'{prefix}/jacobian1', allow_unused=True)
