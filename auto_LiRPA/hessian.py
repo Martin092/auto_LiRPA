@@ -107,13 +107,12 @@ def build_hessian_graph(
         elif node.no_jacobian or not node.from_input or node.no_hessian:
             continue
         else:
-
             node_grad_ori[node.name] = node.build_hessian_node(*grad[node.name])
             logger.debug(f'Built hessian node {node.name}: {node_grad_ori[node.name]}')
 
             node_grad_ori[node.name] += [None] * (
                 len(node.inputs) - len(node_grad_ori[node.name]))
-            # print(node_grad_ori[node.name])
+        
         logger.debug(f'Building hessian node for {node}')
         if not isinstance(node, BoundInput):
             for i in range(len(node.inputs)):
@@ -189,14 +188,7 @@ def build_hessian_graph(
         for k in range(len(node.inputs)):
             if node_grad_ori[node.name][k] is None:
                 continue
-            # print("AAAAAAAAAAA")
-            # print(node_grad_ori[node.name][k][0])
-            # print(tuple(item.detach()
-            #           for item in node_grad_ori[node.name][k][1]))
-            #print("Looking at ", node_grad_ori[node.name][k][0])
-            #print("Passing a tuple: ", tuple(item.detach()
-            #          for item in node_grad_ori[node.name][k][1])
-            #      )
+            
             nodes_op, nodes_in, nodes_out, _ = self._convert_nodes(
                 node_grad_ori[node.name][k][0],
                 tuple(item.detach()

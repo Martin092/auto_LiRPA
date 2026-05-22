@@ -425,10 +425,9 @@ def test_stacked_softplus_soundness(wrapper_cls):
     x0 = torch.tensor([[0.05, -0.1]], dtype=torch.double)
     bounded = BoundedModule(wrapper_cls(model), x0)
 
-    if wrapper_cls is _HessianWrapper:
-        forward_hessian = bounded(x0)
-        expected_forward = _scalar_hessian(model, x0)
-        assert torch.allclose(forward_hessian[0, 0], expected_forward)
+    forward_hessian = bounded(x0)
+    expected_forward = _scalar_hessian(model, x0)
+    assert torch.allclose(forward_hessian[0, 0], expected_forward)
 
     eps = 0.3
     x = BoundedTensor(
