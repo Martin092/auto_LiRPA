@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.hessian import DirectHessianOP
+from auto_LiRPA.operators.hessian import DoubleJacobianOP
 from auto_LiRPA.operators.s_shaped import (
     BoundSigmoidSecondGrad, d2sigmoid, d3sigmoid)
 from auto_LiRPA.perturbations import PerturbationLpNorm
@@ -436,3 +437,84 @@ class _HessianWrapper(nn.Module):
 
     def forward(self, x):
         return DirectHessianOP.apply(self.model(x), x)
+
+
+class _DoubleJacobianWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        return DoubleJacobianOP.apply(self.model(x), x)
+
+
+def test_double_jacobian_softplus_linear_network_soundness():
+    torch.manual_seed(5)
+    model = nn.Sequential(
+        nn.Linear(2, 3),
+        nn.Softplus(),
+        nn.Linear(3, 1),
+    ).double()
+    x0 = torch.tensor([[0.1, -0.2]], dtype=torch.double)
+    bounded = BoundedModule(_DoubleJacobianWrapper(model), x0)
+
+    eps = 0.05
+    x = BoundedTensor(
+        x0, PerturbationLpNorm(norm=float('inf'), eps=eps))
+    grids = [
+        torch.linspace(
+            x0[0, i] - eps, x0[0, i] + eps, steps=9, dtype=torch.double)
+        for i in range(x0.numel())
+    ]
+    for method in ['IBP', 'backward']:
+        lower, upper = bounded.compute_hessian_bounds(x, method=method)
+        for point in itertools.product(*grids):
+            hessian = _scalar_hessian(
+                model, torch.tensor([point], dtype=torch.double))
+            assert torch.all(hessian >= lower[0, 0] - 1e-10)
+            assert torch.all(hessian <= upper[0, 0] + 1e-10)
+
+
+def test_double_jacobian_stacked_softplus_soundness():
+    torch.manual_seed(3)
+    model = nn.Sequential(
+        nn.Linear(2, 2),
+        nn.Softplus(),
+        nn.Softplus(),
+        nn.Linear(2, 1),
+    ).double()
+    x0 = torch.tensor([[0.05, -0.1]], dtype=torch.double)
+    bounded = BoundedModule(_DoubleJacobianWrapper(model), x0)
+
+    eps = 0.3
+    x = BoundedTensor(
+        x0, PerturbationLpNorm(norm=float('inf'), eps=eps))
+    grids = [
+        torch.linspace(
+            x0[0, i] - eps, x0[0, i] + eps, steps=7, dtype=torch.double)
+        for i in range(x0.numel())
+    ]
+    lower, upper = bounded.compute_hessian_bounds(x)
+    for point in itertools.product(*grids):
+        hessian = _scalar_hessian(
+            model, torch.tensor([point], dtype=torch.double))
+        assert torch.all(hessian >= lower[0, 0] - 1e-10)
+        assert torch.all(hessian <= upper[0, 0] + 1e-10)
+
+
+def test_direct_and_double_jacobian_agree_on_forward_value():
+    torch.manual_seed(7)
+    model = nn.Sequential(
+        nn.Linear(2, 3),
+        nn.Sigmoid(),
+        nn.Linear(3, 1),
+    ).double()
+    x0 = torch.tensor([[0.2, -0.3]], dtype=torch.double)
+
+    direct_bounded = BoundedModule(_HessianWrapper(model), x0)
+    double_bounded = BoundedModule(_DoubleJacobianWrapper(model), x0)
+
+    direct_fwd = direct_bounded(x0)
+    double_fwd = double_bounded(x0)
+
+    assert torch.allclose(direct_fwd, double_fwd, atol=1e-10)
