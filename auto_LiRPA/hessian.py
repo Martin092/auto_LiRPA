@@ -99,7 +99,7 @@ def build_hessian_graph(
     queue = deque([output_node])
     while len(queue) > 0:
         node = queue.popleft()
-        print("Node: ",node)
+        logger.debug(f'Visiting node: {node}')
 
         if node == input_node:
             input_node_found = True
@@ -109,14 +109,7 @@ def build_hessian_graph(
         else:
 
             node_grad_ori[node.name] = node.build_hessian_node(*grad[node.name])
-            # if 'jacobian2' in prefix:
-
-            #print(node)
-            #print("START")
-            #for i in range(len(node_grad_ori[node.name])):
-            #    print("\t", node_grad_ori[node.name][i])
-            #print("END")
-            #print()
+            logger.debug(f'Built hessian node {node.name}: {node_grad_ori[node.name]}')
 
             node_grad_ori[node.name] += [None] * (
                 len(node.inputs) - len(node_grad_ori[node.name]))
@@ -133,19 +126,13 @@ def build_hessian_graph(
                     if hasattr(arg, "shape"):
                         return tuple(arg.shape)
                     return repr(arg)
-                #T
-                # print(
-                #     "Node:", node,
-                #     "i:", i,
-                #     "target:", node.inputs[i].name,
-                #     "grad_module:", type(grad_module).__name__,
-                #     "arg_shapes:", [describe_arg(arg) for arg in grad_args],
-                #     "deps:", [dep.name for dep in deps],
-                #     "input_shape:", getattr(grad_module, "input_shape", None),
-                # )
-                #
-                # print("Grad moduls is: ", grad_module)
-                # print("Input is ", grad_args)
+                logger.debug(
+                    f'Converting node {node} input {i}: '
+                    f'target={node.inputs[i].name}, '
+                    f'grad_module={type(grad_module).__name__}, '
+                    f'arg_shapes={[describe_arg(arg) for arg in grad_args]}, '
+                    f'deps={[dep.name for dep in deps]}'
+                )
                 grad[node.inputs[i].name] = grad_module(*grad_args)
                 if not node.inputs[i].name in degree:
                     degree[node.inputs[i].name] = 0
@@ -179,7 +166,7 @@ def build_hessian_graph(
     def add_or_accumulate(node_map, input_name, new_node, tag):
         if input_name in node_map:
             node_cur = node_map[input_name]
-            #print("ADDING ", node_cur, " and ", new_node)
+            logger.debug(f'Accumulating {tag} nodes: {node_cur.name} + {new_node.name}')
             node_add = BoundAdd(
                 attr=None, inputs=[node_cur, new_node],
                 output_index=0, options={})
@@ -216,12 +203,8 @@ def build_hessian_graph(
                       for item in node_grad_ori[node.name][k][1])
             )
 
-            # print("Node op: ", nodes_op)
-            # print("Node in: ", nodes_in)
-            # print("Node out: ", nodes_out)
-            # print()
             logger.debug(f'Converting node operators for: {node}')
-            logger.debug(f'Generated backwards ops: {nodes_op}')
+            logger.debug(f'Generated {len(nodes_op)} backward ops, {len(nodes_in)} inputs, {len(nodes_out)} outputs')
             rename_dict = {}
             assert isinstance(nodes_in[0], BoundInput)
             assert isinstance(nodes_in[1], BoundInput)
@@ -238,9 +221,6 @@ def build_hessian_graph(
                     new_name = f'{prefix}{node.name}/{k}/tmp{nodes_op[i].name}'
                     rename_dict[nodes_op[i].name] = new_name
 
-            # assert len(nodes_out) == 1
-
-            # print("NODES OUT: ", nodes_out)
             if len(nodes_out) != 2:
                 raise RuntimeError(
                     f'Hessian propagation node for {node} must return '
