@@ -211,7 +211,6 @@ def build_jacobian_graph(
 
             if node.inputs[k].name in grad_node:
                 node_cur = grad_node[node.inputs[k].name]
-                print("ADDING ", node_cur, " and ", nodes_out)
                 node_add = BoundAdd(
                     attr=None, inputs=[node_cur, nodes_out],
                     output_index=0, options={})
