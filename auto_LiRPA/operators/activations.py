@@ -19,7 +19,7 @@ those placed in separate files."""
 import torch
 from torch.nn import Module
 
-from .s_shaped import SigmoidGrad
+from .s_shaped import SigmoidGrad, SigmoidGradOp
 from .base import *
 from .activation_base import BoundActivation, BoundOptimizableActivation
 from .clampmult import multiply_by_A_signs
@@ -91,8 +91,10 @@ class SoftplusHessian(Module):
             'eye', torch.eye(dim, dtype=dtype, device=device))
 
     def forward(self, grad_last, hessian_last, preact):
-        d1 = torch.sigmoid(self.beta * preact)
-        d2 = self.beta * d1 * (1 - d1)
+        scaled_preact = self.beta * preact
+        d1 = torch.sigmoid(scaled_preact)
+        # Use the dedicated sigmoid' operator to keep tighter bounds.
+        d2 = self.beta * SigmoidGradOp.apply(scaled_preact)
         grad_input = grad_last * d1.unsqueeze(1)
         scale = d1.unsqueeze(1).unsqueeze(-1) * d1.unsqueeze(1).unsqueeze(-2)
         diagonal_term = (grad_last * d2.unsqueeze(1)).unsqueeze(-1) * self.eye
