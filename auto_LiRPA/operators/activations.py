@@ -95,10 +95,26 @@ class SoftplusHessian(Module):
         d1 = torch.sigmoid(scaled_preact)
         # Use the dedicated sigmoid' operator to keep tighter bounds.
         d2 = self.beta * SigmoidGradOp.apply(scaled_preact)
+        # d1 ** 2 traces as BoundPow(x, 2), which convert_sqr replaces with
+        # BoundSqr, tighter than treating d1*d1 as two independent variables
+        # in BoundMul (McCormick).
+        d1_sq = d1 ** 2
+
         grad_input = grad_last * d1.unsqueeze(1)
-        scale = d1.unsqueeze(1).unsqueeze(-1) * d1.unsqueeze(1).unsqueeze(-2)
+
+        eye4 = self.eye.unsqueeze(0).unsqueeze(0)  # [1, 1, n, n], constant
+
+        # Diagonal: H_ii * d1_i^2, relaxed tightly by BoundSqr
+        h_diag_scaled = hessian_last * eye4 * d1_sq.unsqueeze(1).unsqueeze(-1)
+
+        # Off-diagonal: H_ij * d1_i * d1_j for i≠j.
+        # Multiplying by (1 - eye4) zeroes the diagonal so CROWN sees it as
+        # exactly 0 there and the BoundMul relaxation only applies off-diagonal.
+        outer_d1 = d1.unsqueeze(1).unsqueeze(-1) * d1.unsqueeze(1).unsqueeze(-2)
+        h_offdiag = hessian_last * outer_d1 * (1 - eye4)
+
         diagonal_term = (grad_last * d2.unsqueeze(1)).unsqueeze(-1) * self.eye
-        hessian_input = hessian_last * scale + diagonal_term
+        hessian_input = h_diag_scaled + h_offdiag + diagonal_term
         return grad_input, hessian_input
 
 
