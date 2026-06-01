@@ -19,7 +19,9 @@ those placed in separate files."""
 import torch
 from torch.nn import Module
 
-from .s_shaped import SigmoidGrad, SigmoidGradOp
+from .s_shaped import (
+    CenteredSigmoidSquaredOp, SIGMOID_SQUARED_INFLECTION,
+    SigmoidGrad, SigmoidGradOp)
 from .base import *
 from .activation_base import BoundActivation, BoundOptimizableActivation
 from .clampmult import multiply_by_A_signs
@@ -93,12 +95,10 @@ class SoftplusHessian(Module):
     def forward(self, grad_last, hessian_last, preact):
         scaled_preact = self.beta * preact
         d1 = torch.sigmoid(scaled_preact)
+        centered_scaled_preact = scaled_preact - SIGMOID_SQUARED_INFLECTION
+        d1_sq = CenteredSigmoidSquaredOp.apply(centered_scaled_preact)
         # Use the dedicated sigmoid' operator to keep tighter bounds.
         d2 = self.beta * SigmoidGradOp.apply(scaled_preact)
-        # d1 ** 2 traces as BoundPow(x, 2), which convert_sqr replaces with
-        # BoundSqr, tighter than treating d1*d1 as two independent variables
-        # in BoundMul (McCormick).
-        d1_sq = d1 ** 2
 
         grad_input = grad_last * d1.unsqueeze(1)
 

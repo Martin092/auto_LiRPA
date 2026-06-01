@@ -15,11 +15,15 @@
 ##                                                                     ##
 #########################################################################
 """S-shaped base class, activation functions, and relevant ops."""
+import math
+
 import torch
 from torch.nn import Module
 from torch.autograd import Function
 from .base import *
 from .activation_base import BoundActivation, BoundOptimizableActivation
+
+SIGMOID_SQUARED_INFLECTION = math.log(2.0)
 
 
 class BoundSShaped(BoundOptimizableActivation):
@@ -748,6 +752,16 @@ def d3sigmoid(x):
     return dsigmoid(x) * (1 - 6 * sigmoid_x + 6 * sigmoid_x.pow(2))
 
 
+def centered_sigmoid_squared(x):
+    sigmoid_x = torch.sigmoid(x + SIGMOID_SQUARED_INFLECTION)
+    return sigmoid_x.pow(2)
+
+
+def d_centered_sigmoid_squared(x):
+    sigmoid_x = torch.sigmoid(x + SIGMOID_SQUARED_INFLECTION)
+    return 2 * sigmoid_x.pow(2) * (1 - sigmoid_x)
+
+
 class BoundTanh(BoundSShaped):
     """
     BoundTanh is based on the S-shaped BoundSShaped. In the meantime, it works as the
@@ -1167,6 +1181,41 @@ class SigmoidSecondGradOp(Function):
 class SigmoidSecondGrad(Module):
     def forward(self, g, preact):
         return g * SigmoidSecondGradOp.apply(preact).unsqueeze(1)
+
+
+class CenteredSigmoidSquaredOp(Function):
+    @staticmethod
+    def symbolic(_, centered_preact):
+        return _.op(
+            'grad::CenteredSigmoidSquared', centered_preact
+        ).setType(centered_preact.type())
+
+    @staticmethod
+    def forward(ctx, centered_preact):
+        return centered_sigmoid_squared(centered_preact)
+
+
+class BoundCenteredSigmoidSquared(BoundSShaped):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None,
+                 precompute=True):
+        super().__init__(
+            attr, inputs, output_index, options,
+            activation=(
+                'centered_sigmoid_squared',
+                centered_sigmoid_squared,
+                d_centered_sigmoid_squared),
+            precompute=precompute)
+        # The same-slope path assumes point symmetry around the inflection.
+        if self.activation_bound_option == 'same-slope':
+            self.activation_bound_option = 'adaptive'
+
+    def _init_opt_parameters_impl(self, size_spec, name_start):
+        return super()._init_opt_parameters_impl(
+            size_spec, name_start, num_params=8)
+
+    def build_gradient_node(self, grad_upstream):
+        raise NotImplementedError(
+            'Gradient node for centered sigmoid squared is not implemented.')
 
 
 class SigmoidHessian(Module):

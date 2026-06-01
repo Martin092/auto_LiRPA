@@ -30,6 +30,7 @@ bound_op_map = {
     'grad::Tanh': BoundTanhGrad,
     'grad::Sigmoid': BoundSigmoidGrad,
     'grad::SigmoidSecondGrad': BoundSigmoidSecondGrad,
+    'grad::CenteredSigmoidSquared': BoundCenteredSigmoidSquared,
     'custom::Gelu': BoundGelu,
     'onnx::Clip': BoundHardTanh
 }
