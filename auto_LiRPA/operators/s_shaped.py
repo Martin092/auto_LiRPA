@@ -798,6 +798,59 @@ class TanhGrad(Module):
         return g * TanhGradOp.apply(preact).unsqueeze(1)
 
 
+class TanhSecondGradOp(Function):
+    @staticmethod
+    def symbolic(_, preact):
+        return _.op('grad::TanhSecondGrad', preact).setType(preact.type())
+
+    @staticmethod
+    def forward(ctx, preact):
+        return d2tanh(preact)
+
+
+class TanhSecondGrad(Module):
+    def forward(self, g, preact):
+        return g * TanhSecondGradOp.apply(preact).unsqueeze(1)
+
+
+class BoundTanhSecondGrad(BoundOptimizableActivation):
+    """Bound operator for d2tanh(x) = -2 tanh(x) (1 - tanh(x)^2).
+
+    Extreme points where d3tanh = 0 are at x = ±atanh(1/sqrt(3)) ≈ ±0.6585.
+    """
+
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+        self.requires_input_bounds = [0]
+        self.ibp_intermediate = True
+        self.optimizable = False
+        self.extreme_point = 0.6585026
+
+    def forward(self, x):
+        return d2tanh(x)
+
+    def interval_propagate(self, *v):
+        lower, upper = v[0]
+        fl, fu = d2tanh(lower), d2tanh(upper)
+        bound_lower = torch.min(fl, fu)
+        bound_upper = torch.max(fl, fu)
+        for xp in [-self.extreme_point, self.extreme_point]:
+            val = d2tanh(lower.new_tensor(xp)).expand_as(bound_lower)
+            mask = (lower <= xp) & (upper >= xp)
+            bound_lower = torch.where(mask, torch.min(bound_lower, val), bound_lower)
+            bound_upper = torch.where(mask, torch.max(bound_upper, val), bound_upper)
+        return bound_lower, bound_upper
+
+    def bound_relax(self, x, init=False, dim_opt=None):
+        if init:
+            self.init_linear_relaxation(x, dim_opt)
+        lb, ub = self.interval_propagate((x.lower, x.upper))
+        self.add_linear_relaxation(
+            mask=None, type='lower', k=torch.zeros_like(lb), x0=x.lower, y0=lb)
+        self.add_linear_relaxation(
+            mask=None, type='upper', k=torch.zeros_like(ub), x0=x.lower, y0=ub)
+
+
 class BoundTanhGrad(BoundOptimizableActivation):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None,
                  activation=('tanh', dtanh, d2tanh), precompute=True):
@@ -844,7 +897,13 @@ class BoundTanhGrad(BoundOptimizableActivation):
         if init:
             self.init_linear_relaxation(x, dim_opt)
         return self.bound_relax_impl(x)
-    
+
+    def build_gradient_node(self, grad_upstream):
+        node_grad = TanhSecondGrad()
+        grad_input = (grad_upstream, self.inputs[0].forward_value)
+        grad_extra_nodes = [self.inputs[0]]
+        return [(node_grad, grad_input, grad_extra_nodes)]
+
     def precompute_relaxation(self, x_limit=500):
         """
         This function precomputes the tangent lines that will be used as
