@@ -97,6 +97,7 @@ class SoftplusHessian(Module):
         d1 = torch.sigmoid(scaled_preact)
         centered_scaled_preact = scaled_preact - SIGMOID_SQUARED_INFLECTION
         d1_sq = CenteredSigmoidSquaredOp.apply(centered_scaled_preact)
+        #d1_sq = d1 ** 2
         # Use the dedicated sigmoid' operator to keep tighter bounds.
         d2 = self.beta * SigmoidGradOp.apply(scaled_preact)
 

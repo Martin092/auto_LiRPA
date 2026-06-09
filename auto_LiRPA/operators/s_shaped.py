@@ -994,13 +994,19 @@ class BoundTanhGrad(BoundOptimizableActivation):
         if not flip:
             if x.max() > self.x_limit:
                 warnings.warn(f'Pre-activation bounds are too loose for {self}')
-            # Take the left endpoint of the interval
-            x_indices = torch.searchsorted(self.precompute_x, x, right=True) - 1
+            # Native lookup for an upper endpoint.  Round upward on the
+            # precompute grid so just-above-inflection endpoints do not round
+            # down to unfilled entries.
+            x_indices = torch.searchsorted(self.precompute_x, x, right=False)
+            x_indices = x_indices.clamp(
+                min=0, max=self.precompute_x.numel() - 1)
             return self.d_lower[x_indices], self.d_upper[x_indices]
         else:
             if x.min() < -self.x_limit:
                 warnings.warn(f'Pre-activation bounds are too loose for {self}')
-            # Take the right endpoint of the interval
+            # Reflected lookup for a lower endpoint, using -x as the table key.
+            # Rounding upward in reflected coordinates gives the conservative
+            # table entry after reflecting the tangent point back.
             x_indices = torch.searchsorted(self.precompute_x, -x, right=False)
             return -self.d_lower[x_indices], -self.d_upper[x_indices]
             
@@ -1317,7 +1323,7 @@ class BoundSigmoidSecondGrad(BoundOptimizableActivation):
         self.extreme_point = 1.3169578969248166
         self.outer_inflection_point = 2.2924316695611777
         options = self.options
-        relaxation = options.get('sigmoid_second_grad_relaxation', 'tangent')
+        relaxation = options.get('sigmoid_second_grad_relaxation', 'piecewise')
         relaxation_aliases = {
             'same-slope': 'tangent',
             'old': 'piecewise',
