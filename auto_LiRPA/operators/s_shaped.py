@@ -782,6 +782,11 @@ class BoundTanh(BoundSShaped):
         grad_extra_nodes = [self.inputs[0]]
         return [(node_grad, grad_input, grad_extra_nodes)]
 
+    def build_hessian_trace_node(self, input_states):
+        jacobian, trace = input_states[0]
+        args = (jacobian, trace, self.inputs[0].forward_value)
+        return TanhTraceProp(), args, [self.inputs[0]]
+
 
 class TanhGradOp(Function):
     @staticmethod
@@ -811,6 +816,41 @@ class TanhSecondGradOp(Function):
 class TanhSecondGrad(Module):
     def forward(self, g, preact):
         return g * TanhSecondGradOp.apply(preact).unsqueeze(1)
+
+
+class ActivationTraceProp(Module):
+    """Forward trace propagation through an elementwise activation s(z).
+
+    The Jacobian scales row-wise by s'(z) and the trace picks up the curvature
+    term: t'_k = s'(z_k) t_k + s''(z_k) ||J_k||^2. The squared row norms go
+    through BoundSqr, whose convex relaxation is exact. Subclasses provide the
+    derivative ops so they get their dedicated relaxations.
+    """
+
+    def d1(self, preact):
+        raise NotImplementedError
+
+    def d2(self, preact):
+        raise NotImplementedError
+
+    def forward(self, jacobian, trace, preact):
+        preact = preact.flatten(1) if preact.ndim > 2 else preact
+        d1 = self.d1(preact)
+        d2 = self.d2(preact)
+        # The Jacobian state is (batch, features, input_dim), so the slope
+        # broadcasts over the last dim and the squared row norms reduce over it.
+        jacobian_out = jacobian * d1.unsqueeze(-1)
+        row_sq = (jacobian ** 2).sum(dim=-1)
+        trace_out = d1 * trace + d2 * row_sq
+        return jacobian_out, trace_out
+
+
+class TanhTraceProp(ActivationTraceProp):
+    def d1(self, preact):
+        return TanhGradOp.apply(preact)
+
+    def d2(self, preact):
+        return TanhSecondGradOp.apply(preact)
 
 
 class BoundTanhSecondGrad(BoundOptimizableActivation):
@@ -1216,6 +1256,11 @@ class BoundSigmoid(BoundTanh):
             grad_upstream, hessian_upstream, self.inputs[0].forward_value)
         return [(hessian_node, hessian_input, [self.inputs[0]])]
 
+    def build_hessian_trace_node(self, input_states):
+        jacobian, trace = input_states[0]
+        args = (jacobian, trace, self.inputs[0].forward_value)
+        return SigmoidTraceProp(), args, [self.inputs[0]]
+
 
 class SigmoidGradOp(Function):
     @staticmethod
@@ -1246,6 +1291,14 @@ class SigmoidSecondGradOp(Function):
 class SigmoidSecondGrad(Module):
     def forward(self, g, preact):
         return g * SigmoidSecondGradOp.apply(preact).unsqueeze(1)
+
+
+class SigmoidTraceProp(ActivationTraceProp):
+    def d1(self, preact):
+        return SigmoidGradOp.apply(preact)
+
+    def d2(self, preact):
+        return SigmoidSecondGradOp.apply(preact)
 
 
 class CenteredSigmoidSquaredOp(Function):

@@ -120,6 +120,9 @@ class BoundAdd(Bound):
             grad1 = None
         return [grad0, grad1]
 
+    def build_hessian_trace_node(self, input_states):
+        return _build_add_trace_node(self, input_states, (1.0, 1.0))
+
 
 class BoundSub(Bound):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
@@ -216,6 +219,44 @@ class BoundSub(Bound):
         else:
             grad1 = None
         return [grad0, grad1]
+
+    def build_hessian_trace_node(self, input_states):
+        return _build_add_trace_node(self, input_states, (1.0, -1.0))
+
+
+def _build_add_trace_node(node, input_states, signs):
+    """Shared trace builder for Add and Sub. An addition has no curvature, so
+    states pass through with their signs; a constant operand contributes
+    nothing to either state."""
+    for state, inp in zip(input_states, node.inputs):
+        if state is not None and inp.output_shape != node.output_shape:
+            raise NotImplementedError(
+                'Hessian trace propagation does not support broadcasting a '
+                'perturbed operand of an addition yet.')
+    used_signs = tuple(
+        sign for sign, state in zip(signs, input_states) if state is not None)
+    args = tuple(
+        dummy for state in input_states if state is not None for dummy in state)
+    return AddTraceProp(used_signs), args, []
+
+
+class AddTraceProp(Module):
+    def __init__(self, signs):
+        super().__init__()
+        self.signs = signs
+
+    def forward(self, *states):
+        jacobian_out = None
+        trace_out = None
+        for sign, (jacobian, trace) in zip(
+                self.signs, zip(states[::2], states[1::2])):
+            term_jac = jacobian if sign == 1.0 else sign * jacobian
+            term_trace = trace if sign == 1.0 else sign * trace
+            jacobian_out = (
+                term_jac if jacobian_out is None else jacobian_out + term_jac)
+            trace_out = (
+                term_trace if trace_out is None else trace_out + term_trace)
+        return jacobian_out, trace_out
 
 
 class AddGrad(Module):

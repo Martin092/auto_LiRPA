@@ -52,6 +52,19 @@ class DoubleJacobianOP(torch.autograd.Function):
             *input_shape, *input_shape)
 
 
+class DirectHessianTraceOP(torch.autograd.Function):
+    """Hessian trace via forward-mode trace propagation, never forming the
+    Hessian itself. Returns one trace per flattened output coordinate."""
+    @staticmethod
+    def symbolic(g, output, input):
+        return g.op('grad::direct_hessian_trace', output, input).setType(output.type())
+
+    @staticmethod
+    def forward(ctx, output, input):
+        output_ = output.flatten(1)
+        return output.new_zeros(output.shape[0], output_.shape[-1])
+
+
 class BoundHessianInit(Bound):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
@@ -78,6 +91,26 @@ class BoundDoubleJacobianOP(Bound):
 
     def forward(self, output, input):
         return DoubleJacobianOP.apply(output, input)
+
+
+class BoundDirectHessianTraceOP(Bound):
+    """Marker node for the Hessian trace, expanded by build_hessian_trace_graph."""
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+
+    def forward(self, output, input):
+        return DirectHessianTraceOP.apply(output, input)
+
+
+class BoundHessianTraceInit(Bound):
+    """Trace state at the input node: tr(d^2 x_k / dx^2) = 0 for every k."""
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+        self.never_perturbed = True
+        self.no_jacobian = True
+
+    def forward(self, x):
+        return x.new_zeros(x.shape[0], prod(x.shape[1:]))
 
 
 class BoundHessianOutputReshape(Bound):

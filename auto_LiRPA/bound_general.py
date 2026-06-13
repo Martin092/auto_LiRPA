@@ -152,6 +152,7 @@ class BoundedModule(nn.Module):
         self.forward(*self.global_input)
         self._expand_jacobian()
         self._expand_hessian()
+        self._expand_hessian_trace()
         self._check_patches_mode()
 
         self.next_split_hint = []  # Split hints, used in beta optimization.
@@ -1591,6 +1592,7 @@ class BoundedModule(nn.Module):
                              set_beta_cuts, get_split_nodes)
     from .jacobian import (compute_jacobian_bounds, _expand_jacobian)
     from .hessian import (compute_hessian_bounds, _expand_hessian)
+    from .hessian_trace import (compute_hessian_trace_bounds, _expand_hessian_trace)
     from .optimize_graph import _optimize_graph
     from .edit_graph import add_nodes, add_input_node, delete_node, replace_node
     from .tools import visualize

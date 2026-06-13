@@ -185,22 +185,33 @@ class BoundLinear(BoundOptimizableActivation):
             input_ub = [input_ub[1].transpose(-1, -2) if input_ub[1] is not None else None,
                         input_ub[0].transpose(-1, -2) if input_ub[0] is not None else None,
                         input_ub[2:]]
-            if last_lA is not None:
-                if isinstance(last_lA, torch.Tensor):
-                    last_lA = last_lA.transpose(-1, -2)
-                elif isinstance(last_lA, eyeC):
-                    last_lA = last_lA._replace(shape=last_lA.shape[:-2] + (last_lA.shape[-1], last_lA.shape[-2]))
-                else:
-                    raise NotImplementedError(
-                        f"last_lA's type {type(last_lA)} is not supported for transpose in the case of swapping x and weight.")
-            if last_uA is not None:
-                if isinstance(last_uA, torch.Tensor):
-                    last_uA = last_uA.transpose(-1, -2)
-                elif isinstance(last_uA, eyeC):
-                    last_uA = last_uA._replace(shape=last_uA.shape[:-2] + (last_uA.shape[-1], last_uA.shape[-2]))
-                else:
-                    raise NotImplementedError(
-                        f"last_uA's type {type(last_uA)} is not supported for transpose in the case of swapping x and weight.")
+            def _transpose_A(last_A):
+                if last_A is None:
+                    return None
+                if isinstance(last_A, torch.Tensor):
+                    return last_A.transpose(-1, -2)
+                if isinstance(last_A, eyeC):
+                    # An eyeC is an identity over the flattened output in its
+                    # original (m, n) layout. Under the swap the output is
+                    # viewed transposed, where entry (i, j) sits at flattened
+                    # position j*m + i instead of i*n + j, so the identity
+                    # becomes a permutation and has to be materialized.
+                    # Keeping it as an eyeC silently reordered the specs and
+                    # made the intermediate bounds of this node come out in
+                    # transposed layout, which is unsound for any relaxation
+                    # built on top of them.
+                    spec, batch = last_A.shape[0], last_A.shape[1]
+                    tail = last_A.shape[2:]
+                    assert spec == prod(tail)
+                    eye = torch.eye(spec, device=last_A.device)
+                    dense = eye.view(spec, 1, *tail).transpose(-1, -2)
+                    return dense.expand(spec, batch, *dense.shape[2:])
+                raise NotImplementedError(
+                    f"last_A's type {type(last_A)} is not supported for "
+                    'transpose in the case of swapping x and weight.')
+
+            last_lA = _transpose_A(last_lA)
+            last_uA = _transpose_A(last_uA)
 
         # transpose and scale each term if necessary.
         input_lb = self._preprocess(*input_lb)
@@ -970,6 +981,29 @@ class BoundLinear(BoundOptimizableActivation):
             raise NotImplementedError(
                 "Hessian computation for weight perturbation is not supported yet.")
 
+    def build_hessian_trace_node(self, input_states):
+        if self.is_input_perturbed(1):
+            raise NotImplementedError(
+                'Hessian trace propagation for weight perturbation is not '
+                'supported yet.')
+        if input_states[0] is None:
+            raise NotImplementedError(
+                'Hessian trace propagation through a linear layer expects the '
+                'state on the data input.')
+        if len(self.inputs[0].output_shape) != 2:
+            raise NotImplementedError(
+                'Hessian trace propagation through a linear layer only '
+                'supports flat (batch, features) inputs.')
+        if isinstance(self.inputs[1], BoundParams):
+            w = self.inputs[1].param
+        elif isinstance(self.inputs[1], BoundBuffers):
+            w = self.inputs[1].buffer
+        else:
+            w = self.inputs[1].value
+        if not self.transB:
+            w = w.t()
+        return LinearTraceProp(w.detach()), input_states[0], []
+
     def update_requires_input_bounds(self):
         self._check_weight_perturbation()
 
@@ -1091,10 +1125,18 @@ class BoundNeg(Bound):
     def build_gradient_node(self, grad_upstream):
         return [(NegGrad(), (grad_upstream,), [])]
 
+    def build_hessian_trace_node(self, input_states):
+        return NegTraceProp(), input_states[0], []
+
 
 class NegGrad(Module):
     def forward(self, grad_last):
         return -grad_last
+
+
+class NegTraceProp(Module):
+    def forward(self, jacobian, trace):
+        return -jacobian, -trace
 
 
 class BoundCumSum(Bound):
@@ -1149,6 +1191,29 @@ class LinearHessianProp(Module):
         grad_input = grad_upstream @ weight
         hessian_input = weight.T @ hessian_upstream @ weight
         return grad_input, hessian_input
+
+
+class LinearTraceProp(Module):
+    """Forward trace propagation through z = W h + b. The chain rule maps the
+    Jacobian as W J and, since the layer has no curvature, the per-unit traces
+    simply as W t; the bias drops out of both.
+
+    The Jacobian state uses the standard layout (batch, features, input_dim),
+    matching the reverse-mode Jacobian and Hessian ops, so the step is a plain
+    matmul(W, J). That puts the constant on the left of a perturbed operand,
+    which goes through BoundMatMul's swapped-operand path; its intermediate
+    bounds used to come out transposed, fixed in the eyeC handling of
+    BoundLinear.bound_backward."""
+    def __init__(self, weight):
+        super().__init__()
+        # weight is stored as (out_features, in_features)
+        self.weight = weight
+
+    def forward(self, jacobian, trace):
+        weight = self.weight.to(jacobian)
+        jacobian_out = weight.matmul(jacobian)
+        trace_out = F.linear(trace, weight)
+        return jacobian_out, trace_out
 
 
 class MatMulGrad(Module):

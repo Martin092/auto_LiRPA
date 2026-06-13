@@ -20,7 +20,7 @@ import torch
 from torch.nn import Module
 
 from .s_shaped import (
-    CenteredSigmoidSquaredOp, SIGMOID_SQUARED_INFLECTION,
+    ActivationTraceProp, CenteredSigmoidSquaredOp, SIGMOID_SQUARED_INFLECTION,
     SigmoidGrad, SigmoidGradOp)
 from .base import *
 from .activation_base import BoundActivation, BoundOptimizableActivation
@@ -73,6 +73,11 @@ class BoundSoftplus(BoundActivation):
         hessian_input = (grad_upstream, hessian_upstream, self.inputs[0].forward_value)
         return [(hessian_node, hessian_input, [self.inputs[0]])]
 
+    def build_hessian_trace_node(self, input_states):
+        jacobian, trace = input_states[0]
+        args = (jacobian, trace, self.inputs[0].forward_value)
+        return SoftplusTraceProp(beta=self.softplus.beta), args, [self.inputs[0]]
+
 
 class SoftplusGrad(Module):
     def __init__(self, beta=1.0, threshold=20.0):
@@ -83,6 +88,20 @@ class SoftplusGrad(Module):
     def forward(self, grad_last, preact):
         grad = torch.sigmoid(self.beta * preact)
         return grad_last * grad.unsqueeze(1)
+
+
+class SoftplusTraceProp(ActivationTraceProp):
+    """softplus' is the plain sigmoid, which already has a tight relaxation;
+    softplus'' = beta * sigmoid'(beta z) goes through the dedicated grad op."""
+    def __init__(self, beta=1.0):
+        super().__init__()
+        self.beta = beta
+
+    def d1(self, preact):
+        return torch.sigmoid(self.beta * preact)
+
+    def d2(self, preact):
+        return self.beta * SigmoidGradOp.apply(self.beta * preact)
 
 
 class SoftplusHessian(Module):

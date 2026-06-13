@@ -466,7 +466,30 @@ class Bound(nn.Module):
         """
         return not_implemented_op(self, 'build_gradient_node')
 
-    def  build_hessian_trace_node(self, grad_upstream, trace_upstream):
+    def build_hessian_trace_node(self, input_states):
+        r"""
+        Function for building the forward-mode Hessian trace node.
+
+        Unlike the reverse-mode gradient and Hessian builders, trace
+        propagation runs forwards from the model input. Every node on the path
+        carries two states: the Jacobian of its (flattened) output with
+        respect to the model input, in the standard layout
+        (batch, numel, input_dim), and the per-output Hessian traces
+        tr(d^2 out_k / d input^2), shape (batch, numel).
+
+        Args:
+            input_states: A list aligned with ``self.inputs``. Each entry is a
+            ``(jacobian, trace)`` tuple of dummy tensors for inputs that carry
+            state (depend on the model input), or ``None`` for the rest.
+            Values do not matter, only shapes.
+
+        Returns:
+            A ``(module, args, deps)`` tuple. ``module.forward(*args)`` must
+            return the ``(jacobian, trace)`` states of this node's output.
+            ``args`` must start with the jacobian and trace dummies of every
+            state-carrying input, in input order, followed by dummy values for
+            ``deps``, the graph nodes whose forward values the module reads.
+        """
         return not_implemented_op(self, 'build_hessian_trace_node')
 
     def  build_hessian_node(self, grad_upstream, hessian_upstream):

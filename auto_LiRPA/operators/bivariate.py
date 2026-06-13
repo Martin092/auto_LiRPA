@@ -491,6 +491,24 @@ class BoundMul(BoundOptimizableActivation):
             grad_upstream, hessian_upstream, self.inputs[0].forward_value)
         return [None, (hessian_node, hessian_input, [self.inputs[0]])]
 
+    def build_hessian_trace_node(self, input_states):
+        for state, inp in zip(input_states, self.inputs):
+            if state is not None and inp.output_shape != self.output_shape:
+                raise NotImplementedError(
+                    'Hessian trace propagation for BoundMul does not support '
+                    'broadcasting a perturbed input yet.')
+
+        if input_states[0] is not None and input_states[1] is not None:
+            args = (*input_states[0], *input_states[1],
+                    self.inputs[0].forward_value, self.inputs[1].forward_value)
+            return (MulTraceProp(both_perturbed=True), args,
+                    [self.inputs[0], self.inputs[1]])
+
+        state_index = 0 if input_states[0] is not None else 1
+        factor_node = self.inputs[1 - state_index]
+        args = (*input_states[state_index], factor_node.forward_value)
+        return MulTraceProp(both_perturbed=False), args, [factor_node]
+
 
 class MulGrad(Module):
     def __init__(self, input_shape):
@@ -505,6 +523,37 @@ class MulGrad(Module):
             # If y is not a constant scalar, its second dimension is for spec
             y = y.unsqueeze(1)
         return reduce_broadcast_dims(grad_last * y, self.input_shape)
+
+
+class MulTraceProp(Module):
+    """Forward trace propagation through z = x * y.
+
+    With one factor constant the states just scale. With both perturbed the
+    product rule applies to the Jacobians and the trace picks up the bilinear
+    curvature term 2 J_x J_y^T read row-wise, which is the trace of the mixed
+    Hessian blocks the full reverse-mode propagation cannot represent.
+    """
+    def __init__(self, both_perturbed):
+        super().__init__()
+        self.both_perturbed = both_perturbed
+
+    def forward(self, *args):
+        # The Jacobian states are (batch, features, input_dim).
+        if self.both_perturbed:
+            jac_x, trace_x, jac_y, trace_y, x, y = args
+            x = x.flatten(1) if x.ndim > 2 else x
+            y = y.flatten(1) if y.ndim > 2 else y
+            jacobian_out = y.unsqueeze(-1) * jac_x + x.unsqueeze(-1) * jac_y
+            cross = 2 * (jac_x * jac_y).sum(dim=-1)
+            trace_out = y * trace_x + x * trace_y + cross
+            return jacobian_out, trace_out
+
+        jacobian, trace, factor = args
+        if factor.ndim > 2:
+            factor = factor.flatten(1)
+        jacobian_out = jacobian * factor.unsqueeze(-1)
+        trace_out = trace * factor
+        return jacobian_out, trace_out
 
 
 class MulHessian(Module):
