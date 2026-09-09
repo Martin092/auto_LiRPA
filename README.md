@@ -10,6 +10,70 @@
 <a href="http://PaperCode.cc/AutoLiRPA-Video"><img src="http://www.huan-zhang.com/images/upload/lirpa/auto_lirpa_1.png" width="45%" height="45%" float="right"></a>
 </p>
 
+## Hessian Bounds (this fork)
+
+This fork adds certified bounds on the **second** derivative of a network. Put
+one of four markers on the model output and it is expanded into a bound
+propagation graph when the `BoundedModule` is built:
+
+| Quantity | Marker | Bounds via | Direction | Cost |
+| --- | --- | --- | --- | --- |
+| Hessian trace | `DirectHessianTraceOP` | `compute_hessian_trace_bounds` | forward | O(m·d) |
+| Hessian diagonal | `DirectHessianDiagOP` | `compute_hessian_diag_bounds` | forward | O(m·d) |
+| Full Hessian | `DirectHessianOP` | `compute_hessian_bounds` | reverse, per operator | O(m·d²) |
+| Full Hessian | `DoubleJacobianOP` | `compute_hessian_bounds` | reverse, Jacobian twice | O(m·d²) |
+
+`m` is the output size, `d` the input size. All four accept the usual `method`
+argument (`IBP`, `backward`, `alpha-CROWN`).
+
+```python
+from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
+from auto_LiRPA.hessian_trace import DirectHessianTraceOP
+
+class TraceWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        return DirectHessianTraceOP.apply(self.model(x), x)
+
+bounded = BoundedModule(TraceWrapper(model), my_input)
+my_input = BoundedTensor(my_input, PerturbationLpNorm(norm=np.inf, eps=0.1))
+lower, upper = bounded.compute_hessian_trace_bounds(my_input, method='backward')
+```
+
+### Which one to use
+
+* The trace and the diagonal never form the Hessian, so they are a factor of `d`
+  cheaper and cost about the same as each other. Do not compute the full matrix
+  just to reduce it.
+* They are only available forwards. Pulling `tr(H)` through a linear layer needs
+  `diag(WᵀHW)`, which reads every entry of `H`, so there is no reverse version.
+* For a single entry there is no dedicated operator: index into the diagonal if
+  it is on the diagonal, otherwise build the full matrix.
+* For the full matrix prefer `DoubleJacobianOP`, which covers everything the
+  Jacobian expansion covers. `DirectHessianOP` needs a per-operator
+  `build_hessian_node` and so far handles Linear, Sigmoid, Softplus,
+  Reshape/Flatten and Mul with one constant operand, but not `tanh` or a product
+  of two perturbed operands.
+
+### Relaxation options
+
+Both are fixed when the `BoundedModule` is built, before the bound method is
+known, so choose them to match the method you will run.
+
+* `softplus_hessian_squared_relaxation` picks how `softplus'(z)²` is relaxed.
+  The default `'sqr'` is about 1 to 5% tighter under CROWN and 12% faster;
+  `'centered_sigmoid_squared'` is 4 to 14% tighter under alpha-CROWN. Under IBP
+  they agree, and the term only matters from the second activation layer on.
+* `sigmoid_second_grad_relaxation` picks how `sigmoid''` is relaxed. The default
+  `'piecewise'` is optimizable by alpha-CROWN; `'tangent'` is fixed.
+
+New operators: `BoundTanhSecondGrad`, `BoundSigmoidSecondGrad` and
+`BoundCenteredSigmoidSquared`, plus `build_gradient_node` on `BoundTanhGrad` and
+`BoundSigmoidGrad`, which is what lets the Jacobian expansion run a second time.
+
 ## What's New?
 - [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) (using `auto_LiRPA` as its core library) is the winner of [VNN-COMP 2025](https://sites.google.com/view/vnn2025) and is **ranked top-1** in all [scored benchmarks](https://github.com/VNN-COMP/vnncomp2025_results/blob/main/SCORING-SMALL-TOL/latex/main.pdf). (08/2025)
 - Bounding of computation graphs containing Jacobian operators now supports more nonlinear operators (e.g., ```tanh```, ```sigmoid```), enabling verification of [continuous-time Lyapunov stability](https://github.com/Verified-Intelligence/Two-Stage_Neural_Controller_Training). (12/2025)

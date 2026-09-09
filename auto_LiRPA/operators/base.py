@@ -32,6 +32,20 @@ torch._C._jit_set_profiling_mode(False)
 epsilon = 1e-12
 
 
+def select_state_prop(kind, trace_cls, diag_cls=None):
+    """Pick the module to use for a Hessian trace or diagonal graph.
+
+    Trace and diagonal follow the same recursion, so an operator writes one
+    builder and only changes which module it returns. If the rule is the same
+    for both, pass a single class.
+    """
+    if kind == 'trace':
+        return trace_cls
+    if kind == 'diag':
+        return trace_cls if diag_cls is None else diag_cls
+    raise ValueError(f'Unknown Hessian state kind: {kind}')
+
+
 def not_implemented_op(node, func):
     message = (
         f'Function `{func}` of `{node}` is not supported yet.'
@@ -145,7 +159,6 @@ class Bound(nn.Module):
         # If True, when building the Jacobian graph, this node should be treated
         # as a constant and there is no need to further propagate Jacobian.
         self.no_jacobian = False
-        self.no_hessian = False
         # If True, when we are computing intermediate bounds for these ops,
         # we simply use IBP to propagate bounds from its input nodes
         # instead of CROWN. Currently only operators with a single input can be
@@ -466,53 +479,35 @@ class Bound(nn.Module):
         """
         return not_implemented_op(self, 'build_gradient_node')
 
-    def build_hessian_trace_node(self, input_states):
+    def build_hessian_state_node(self, input_states, kind):
         r"""
-        Function for building the forward-mode Hessian trace node.
+        Build the node for a Hessian trace or diagonal graph.
 
-        Unlike the reverse-mode gradient and Hessian builders, trace
-        propagation runs forwards from the model input. Every node on the path
-        carries two states: the Jacobian of its (flattened) output with
-        respect to the model input, in the standard layout
-        (batch, numel, input_dim), and the per-output Hessian traces
-        tr(d^2 out_k / d input^2), shape (batch, numel).
+        This runs forwards from the model input, unlike the gradient and
+        Hessian builders. Each node carries two things: the Jacobian of its
+        flattened output with respect to the model input, shape
+        (batch, numel, input_dim), and the state. The state is the trace,
+        shape (batch, numel), or the diagonal, shape
+        (batch, numel, input_dim). Both use the same recursion, so one method
+        covers them.
 
         Args:
-            input_states: A list aligned with ``self.inputs``. Each entry is a
-            ``(jacobian, trace)`` tuple of dummy tensors for inputs that carry
-            state (depend on the model input), or ``None`` for the rest.
-            Values do not matter, only shapes.
+            input_states: One entry per item in ``self.inputs``. It is a
+            ``(jacobian, state)`` tuple of dummy tensors if that input depends
+            on the model input, and ``None`` otherwise. Only shapes matter.
+
+            kind: ``'trace'`` or ``'diag'``.
 
         Returns:
-            A ``(module, args, deps)`` tuple. ``module.forward(*args)`` must
-            return the ``(jacobian, trace)`` states of this node's output.
-            ``args`` must start with the jacobian and trace dummies of every
-            state-carrying input, in input order, followed by dummy values for
-            ``deps``, the graph nodes whose forward values the module reads.
+            A ``(module, args, deps)`` tuple, where
+            ``module.forward(*args)`` returns the ``(jacobian, state)`` of
+            this node's output. ``args`` starts with the jacobian and state of
+            every input that has one, in input order, then dummy values for
+            ``deps``, the nodes whose forward values the module reads.
         """
-        return not_implemented_op(self, 'build_hessian_trace_node')
+        return not_implemented_op(self, f'build_hessian_{kind}_node')
 
-    def build_hessian_diag_node(self, input_states):
-        r"""
-        Function for building the forward-mode Hessian diagonal node.
-
-        Same contract as ``build_hessian_trace_node``, except the second state
-        is the per-output Hessian diagonal diag(d^2 out_k / d input^2), shape
-        (batch, numel, input_dim) - the trace state with the reduction over
-        input dimensions deferred.
-
-        Args:
-            input_states: A list aligned with ``self.inputs``. Each entry is a
-            ``(jacobian, diag)`` tuple of dummy tensors for inputs that carry
-            state, or ``None`` for the rest. Only shapes matter.
-
-        Returns:
-            A ``(module, args, deps)`` tuple, as in build_hessian_trace_node,
-            with ``module.forward(*args)`` returning ``(jacobian, diag)``.
-        """
-        return not_implemented_op(self, 'build_hessian_diag_node')
-
-    def  build_hessian_node(self, grad_upstream, hessian_upstream):
+    def build_hessian_node(self, grad_upstream, hessian_upstream):
         return not_implemented_op(self, 'build_hessian_node')
 
     def get_bias(self, A, bias):

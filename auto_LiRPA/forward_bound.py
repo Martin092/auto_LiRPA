@@ -192,7 +192,6 @@ def forward_general_dynamic(self: 'BoundedModule', C=None, node:'Bound'=None,
         linear.lb = linear.ub = torch.zeros_like(linear.lb)
 
     lw, lb, tot_dim = linear.lw, linear.lb, linear.tot_dim
-    #logger.debug(f'forward_general_dynamic: node={node}, w_size={lw.shape[1]}, tot_dim={tot_dim}')
 
     if C is not None and not C_merged:
         # FIXME use bound_forward of BoundLinear

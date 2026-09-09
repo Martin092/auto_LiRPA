@@ -440,6 +440,46 @@ def test_stacked_softplus_soundness(wrapper_cls):
         assert torch.all(hessian <= upper[0, 0] + 1e-5)
 
 
+@pytest.mark.parametrize(
+    "relaxation", ['sqr', 'centered_sigmoid_squared'])
+@pytest.mark.parametrize("method", ['IBP', 'backward', 'alpha-CROWN'])
+def test_softplus_hessian_squared_relaxations_are_sound(relaxation, method):
+    """Both relaxations of softplus'(z)^2 must bound the true Hessian.
+
+    Two activation layers, because the Hessian reaching the first one is zero
+    and the squared term drops out of a single-layer net entirely.
+    """
+    torch.manual_seed(0)
+    model = nn.Sequential(
+        nn.Linear(2, 4), nn.Softplus(), nn.Linear(4, 4), nn.Softplus(),
+        nn.Linear(4, 1))
+    x0 = torch.tensor([[0.1, -0.2]])
+    bounded = BoundedModule(
+        _HessianWrapper(model), x0,
+        bound_opts={
+            'softplus_hessian_squared_relaxation': relaxation,
+            'optimize_bound_args': {'iteration': 3},
+        })
+
+    eps = 0.3
+    x = BoundedTensor(x0, PerturbationLpNorm(norm=float('inf'), eps=eps))
+    lower, upper = bounded.compute_hessian_bounds(x, method=method)
+    for point in itertools.product(*_make_grid(x0, eps, 7)):
+        hessian = _scalar_hessian(model, torch.tensor([point]))
+        assert torch.all(hessian >= lower[0, 0] - 1e-5)
+        assert torch.all(hessian <= upper[0, 0] + 1e-5)
+
+
+def test_softplus_hessian_squared_relaxation_rejects_unknown_option():
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(2, 3), nn.Softplus(), nn.Linear(3, 1))
+    x0 = torch.tensor([[0.1, -0.2]])
+    with pytest.raises(ValueError, match='softplus_hessian_squared_relaxation'):
+        BoundedModule(
+            _HessianWrapper(model), x0,
+            bound_opts={'softplus_hessian_squared_relaxation': 'nonsense'})
+
+
 def test_direct_and_double_jacobian_agree_on_forward_value():
     torch.manual_seed(7)
     model = nn.Sequential(

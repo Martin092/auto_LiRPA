@@ -104,7 +104,7 @@ def build_hessian_graph(
         if node == input_node:
             input_node_found = True
             continue
-        elif node.no_jacobian or not node.from_input or node.no_hessian:
+        elif node.no_jacobian or not node.from_input:
             continue
         else:
             node_grad_ori[node.name] = node.build_hessian_node(*grad[node.name])
@@ -181,7 +181,7 @@ def build_hessian_graph(
 
         if node == input_node:
             return hess_node[node.name]
-        if node.no_jacobian or not node.from_input or node.no_hessian:
+        if node.no_jacobian or not node.from_input:
             continue
 
         logger.debug(f'Converting gradient node for {node}')

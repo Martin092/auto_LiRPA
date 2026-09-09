@@ -22,6 +22,18 @@ from .base import Bound
 from ..utils import prod
 
 
+def full_hessian_zeros(output, input):
+    """Forward pass for the full-Hessian markers, used only for its shape.
+
+    The graph expansion replaces these nodes before any bound is computed, so
+    only the shape (batch, out_numel, *input_shape, *input_shape) matters.
+    """
+    output_ = output.flatten(1)
+    input_shape = tuple(input.shape[1:])
+    return output.new_zeros(
+        output.shape[0], output_.shape[-1], *input_shape, *input_shape)
+
+
 class DirectHessianOP(torch.autograd.Function):
     """Direct hessian computation via per-operator hessian propagation."""
     @staticmethod
@@ -30,11 +42,7 @@ class DirectHessianOP(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, output, input):
-        output_ = output.flatten(1)
-        input_shape = tuple(input.shape[1:])
-        return output.new_zeros(
-            output.shape[0], output_.shape[-1],
-            *input_shape, *input_shape)
+        return full_hessian_zeros(output, input)
 
 
 class DoubleJacobianOP(torch.autograd.Function):
@@ -45,11 +53,7 @@ class DoubleJacobianOP(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, output, input):
-        output_ = output.flatten(1)
-        input_shape = tuple(input.shape[1:])
-        return output.new_zeros(
-            output.shape[0], output_.shape[-1],
-            *input_shape, *input_shape)
+        return full_hessian_zeros(output, input)
 
 
 class DirectHessianTraceOP(torch.autograd.Function):
@@ -81,70 +85,56 @@ class DirectHessianDiagOP(torch.autograd.Function):
             output.shape[0], output_.shape[-1], input_.shape[-1])
 
 
-class BoundHessianInit(Bound):
+class _HessianStateInit(Bound):
+    """Base for the zero state a Hessian graph starts from.
+
+    This state is a constant, so it is never perturbed and the Jacobian
+    expansion should not go into it.
+    """
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
         self.never_perturbed = True
         self.no_jacobian = True
 
+
+class BoundHessianInit(_HessianStateInit):
     def forward(self, x, y):
         return x.new_zeros(
             x.shape[0], *y.shape[1:], *x.shape[1:], *x.shape[1:])
 
+
 class BoundDirectHessianOP(Bound):
     """Bound propagation for direct hessian via per-operator hessian propagation."""
-    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
-        super().__init__(attr, inputs, output_index, options)
-
     def forward(self, output, input):
         return DirectHessianOP.apply(output, input)
 
 
 class BoundDoubleJacobianOP(Bound):
     """Bound propagation for double jacobian hessian (jacobian of jacobian)."""
-    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
-        super().__init__(attr, inputs, output_index, options)
-
     def forward(self, output, input):
         return DoubleJacobianOP.apply(output, input)
 
 
 class BoundDirectHessianTraceOP(Bound):
     """Marker node for the Hessian trace, expanded by build_hessian_trace_graph."""
-    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
-        super().__init__(attr, inputs, output_index, options)
-
     def forward(self, output, input):
         return DirectHessianTraceOP.apply(output, input)
 
 
-class BoundHessianTraceInit(Bound):
+class BoundHessianTraceInit(_HessianStateInit):
     """Trace state at the input node: tr(d^2 x_k / dx^2) = 0 for every k."""
-    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
-        super().__init__(attr, inputs, output_index, options)
-        self.never_perturbed = True
-        self.no_jacobian = True
-
     def forward(self, x):
         return x.new_zeros(x.shape[0], prod(x.shape[1:]))
 
 
 class BoundDirectHessianDiagOP(Bound):
     """Marker node for the Hessian diagonal, expanded by build_hessian_diag_graph."""
-    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
-        super().__init__(attr, inputs, output_index, options)
-
     def forward(self, output, input):
         return DirectHessianDiagOP.apply(output, input)
 
 
-class BoundHessianDiagInit(Bound):
+class BoundHessianDiagInit(_HessianStateInit):
     """Diag state at the input node: diag(d^2 x_k / dx^2) = 0 for every k."""
-    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
-        super().__init__(attr, inputs, output_index, options)
-        self.never_perturbed = True
-        self.no_jacobian = True
-
     def forward(self, x):
         dim = prod(x.shape[1:])
         return x.new_zeros(x.shape[0], dim, dim)

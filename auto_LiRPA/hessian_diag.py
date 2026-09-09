@@ -1,10 +1,9 @@
-"""Hessian diagonal bounds via forward-mode propagation.
+"""Bounds on the Hessian diagonal, computed forwards.
 
-Same recursion as the Hessian trace (see hessian_trace.py), with the final
-reduction over input dimensions deferred: the state carried per graph node is
-the Jacobian (batch, numel, input_dim) plus the per-coordinate Hessian
-diagonals diag(d^2 out_k / d input^2), also (batch, numel, input_dim). Every
-per-op rule is the trace rule with the sum over input dimensions dropped:
+Same recursion as the Hessian trace (see hessian_trace.py), but without the
+final sum over input dimensions. Each node carries the Jacobian and the
+diagonal diag(d^2 out_k / d input^2), both of shape
+(batch, numel, input_dim). Every rule is the trace rule with the sum dropped:
 
     input x:           D = 0
     linear  Wu + b:    D' = W D
@@ -12,10 +11,8 @@ per-op rule is the trace rule with the sum over input dimensions dropped:
     add  u + v:        D' = D_u + D_v
     mul  u . v:        D' = v.D_u + u.D_v + 2 (J_u . J_v)     (elementwise)
 
-The full Hessian is never formed: memory stays at twice the Jacobian state,
-O(numel * input_dim), instead of O(numel * input_dim^2).
-
-Usage mirrors the trace marker:
+The full Hessian is never built, so memory stays at O(numel * input_dim)
+instead of O(numel * input_dim^2).
 
     class DiagWrapper(nn.Module):
         def forward(self, x):
@@ -67,10 +64,9 @@ def build_hessian_diag_graph(self, output_node, input_node, prefix=None):
     prefix = f'/hessian_diag{output_node.name}' if prefix is None else prefix
     return build_forward_state_graph(
         self, output_node, input_node, prefix=prefix,
-        builder_attr='build_hessian_diag_node',
+        kind='diag',
         state_init_cls=BoundHessianDiagInit,
-        state_dummy_shape=lambda batch, dim: (batch, dim, dim),
-        state_label='diag')
+        state_dummy_shape=lambda batch, dim: (batch, dim, dim))
 
 
 __all__ = [

@@ -63,8 +63,6 @@ class BoundLinear(BoundOptimizableActivation):
         # In this case, we swap the roles of x and weight.
         self.swap_x_and_weight = False
 
-        self.no_hessian = False
-
     def _preprocess(self, a, b, c=None):
         """Handle tranpose and linear coefficients."""
         if self.transA and isinstance(a, Tensor):
@@ -948,84 +946,48 @@ class BoundLinear(BoundOptimizableActivation):
         self.solver_vars = new_layer_gurobi_vars
         model.update()
 
-    def build_gradient_node(self, grad_upstream):
-        if not self.is_input_perturbed(1):
-            if isinstance(self.inputs[1], BoundParams):
-                w = self.inputs[1].param
-            elif isinstance(self.inputs[1], BoundBuffers):
-                w = self.inputs[1].buffer
-            else:
-                w = self.inputs[1].value
-            if not self.transB:
-                w = w.t()
-            node_grad = LinearGrad(w.detach())
-            return [(node_grad, (grad_upstream,), [])]
+    def _constant_weight(self):
+        """The weight as a detached (out_features, in_features) tensor.
+
+        Only valid when input 1 is not perturbed. Callers check that first.
+        """
+        if isinstance(self.inputs[1], BoundParams):
+            w = self.inputs[1].param
+        elif isinstance(self.inputs[1], BoundBuffers):
+            w = self.inputs[1].buffer
         else:
+            w = self.inputs[1].value
+        if not self.transB:
+            w = w.t()
+        return w.detach()
+
+    def build_gradient_node(self, grad_upstream):
+        if self.is_input_perturbed(1):
             raise NotImplementedError(
-                "Gradient computation for weight perturbation is not supported yet.")
+                'Gradient computation for weight perturbation is not supported yet.')
+        return [(LinearGrad(self._constant_weight()), (grad_upstream,), [])]
 
     def build_hessian_node(self, grad_upstream, hessian_upstream):
-        if not self.is_input_perturbed(1):
-            if isinstance(self.inputs[1], BoundParams):
-                w = self.inputs[1].param
-            elif isinstance(self.inputs[1], BoundBuffers):
-                w = self.inputs[1].buffer
-            else:
-                w = self.inputs[1].value
-            if not self.transB:
-                w = w.t()
-            grad_node = LinearHessianProp(w.detach())
-            grad_input = (grad_upstream, hessian_upstream)
-            return [(grad_node, grad_input, [])]
-        else:
-            raise NotImplementedError(
-                "Hessian computation for weight perturbation is not supported yet.")
-
-    def build_hessian_trace_node(self, input_states):
         if self.is_input_perturbed(1):
             raise NotImplementedError(
-                'Hessian trace propagation for weight perturbation is not '
-                'supported yet.')
-        if input_states[0] is None:
-            raise NotImplementedError(
-                'Hessian trace propagation through a linear layer expects the '
-                'state on the data input.')
-        if len(self.inputs[0].output_shape) != 2:
-            raise NotImplementedError(
-                'Hessian trace propagation through a linear layer only '
-                'supports flat (batch, features) inputs.')
-        if isinstance(self.inputs[1], BoundParams):
-            w = self.inputs[1].param
-        elif isinstance(self.inputs[1], BoundBuffers):
-            w = self.inputs[1].buffer
-        else:
-            w = self.inputs[1].value
-        if not self.transB:
-            w = w.t()
-        return LinearTraceProp(w.detach()), input_states[0], []
+                'Hessian computation for weight perturbation is not supported yet.')
+        grad_node = LinearHessianProp(self._constant_weight())
+        return [(grad_node, (grad_upstream, hessian_upstream), [])]
 
-    def build_hessian_diag_node(self, input_states):
+    def build_hessian_state_node(self, input_states, kind):
         if self.is_input_perturbed(1):
             raise NotImplementedError(
-                'Hessian diag propagation for weight perturbation is not '
-                'supported yet.')
+                f'Hessian {kind} propagation for weight perturbation is not supported yet.')
         if input_states[0] is None:
             raise NotImplementedError(
-                'Hessian diag propagation through a linear layer expects the '
-                'state on the data input.')
+                f'Hessian {kind} propagation through a linear layer expects '
+                'the state on the data input.')
         if len(self.inputs[0].output_shape) != 2:
             raise NotImplementedError(
-                'Hessian diag propagation through a linear layer only '
+                f'Hessian {kind} propagation through a linear layer only '
                 'supports flat (batch, features) inputs.')
-        if isinstance(self.inputs[1], BoundParams):
-            w = self.inputs[1].param
-        elif isinstance(self.inputs[1], BoundBuffers):
-            w = self.inputs[1].buffer
-        else:
-            w = self.inputs[1].value
-        if not self.transB:
-            w = w.t()
-        return LinearDiagProp(w.detach()), input_states[0], []
+        prop = select_state_prop(kind, LinearTraceProp, LinearDiagProp)
+        return prop(self._constant_weight()), input_states[0], []
 
     def update_requires_input_bounds(self):
         self._check_weight_perturbation()
@@ -1163,12 +1125,10 @@ class BoundNeg(Bound):
     def build_gradient_node(self, grad_upstream):
         return [(NegGrad(), (grad_upstream,), [])]
 
-    def build_hessian_trace_node(self, input_states):
-        return NegTraceProp(), input_states[0], []
-
-    def build_hessian_diag_node(self, input_states):
-        # negation is elementwise on both states, so the trace prop applies
-        return NegTraceProp(), input_states[0], []
+    def build_hessian_state_node(self, input_states, kind):
+        # Negation is elementwise on both states, so one rule serves both
+        prop = select_state_prop(kind, NegStateProp)
+        return prop(), input_states[0], []
 
 
 class NegGrad(Module):
@@ -1176,9 +1136,11 @@ class NegGrad(Module):
         return -grad_last
 
 
-class NegTraceProp(Module):
-    def forward(self, jacobian, trace):
-        return -jacobian, -trace
+class NegStateProp(Module):
+    """Negation flips the sign of both states, so one module covers the trace
+    and the diagonal graphs."""
+    def forward(self, jacobian, state):
+        return -jacobian, -state
 
 
 class BoundCumSum(Bound):
@@ -1214,15 +1176,6 @@ class LinearGrad(Module):
         weight = self.weight.to(grad_last).t()
         return F.linear(grad_last, weight)
 
-class LinearHessian(Module):
-    def __init__(self, weight):
-        super().__init__()
-        self.input_dim = weight.shape[0]
-        self.out_dim = weight.shape[1] # not handling 3d layers, dont think we should either
-
-    def forward(self):
-        return torch.zeros(self.out_dim, self.input_dim, self.input_dim)
-
 class LinearHessianProp(Module):
     def __init__(self, weight):
         super().__init__()
@@ -1236,43 +1189,36 @@ class LinearHessianProp(Module):
 
 
 class LinearTraceProp(Module):
-    """Forward trace propagation through z = W h + b. The chain rule maps the
-    Jacobian as W J and, since the layer has no curvature, the per-unit traces
-    simply as W t; the bias drops out of both.
+    """Trace propagation through z = W h + b.
 
-    The Jacobian state uses the standard layout (batch, features, input_dim),
-    matching the reverse-mode Jacobian and Hessian ops, so the step is a plain
-    matmul(W, J). That puts the constant on the left of a perturbed operand,
-    which goes through BoundMatMul's swapped-operand path; its intermediate
-    bounds used to come out transposed, fixed in the eyeC handling of
-    BoundLinear.bound_backward."""
+    A linear layer has no curvature, so both states just map through W:
+    J' = W J and t' = W t. The bias drops out of both.
+
+    The Jacobian has shape (batch, features, input_dim), so the step is a
+    plain matmul(W, J). This puts a constant on the left of a perturbed
+    operand, which BoundMatMul handles by swapping them.
+    """
     def __init__(self, weight):
         super().__init__()
         # weight is stored as (out_features, in_features)
         self.weight = weight
 
-    def forward(self, jacobian, trace):
+    def map_state(self, state, weight):
+        # The trace is (batch, features), one scalar per unit
+        return F.linear(state, weight)
+
+    def forward(self, jacobian, state):
         weight = self.weight.to(jacobian)
-        jacobian_out = weight.matmul(jacobian)
-        trace_out = F.linear(trace, weight)
-        return jacobian_out, trace_out
+        return weight.matmul(jacobian), self.map_state(state, weight)
 
 
-class LinearDiagProp(Module):
-    """Forward Hessian-diagonal propagation through z = W h + b. The layer has
-    no curvature, so both states map linearly: J' = W J and D' = W D, with the
-    diag state in the same (batch, features, input_dim) layout as the
-    Jacobian."""
-    def __init__(self, weight):
-        super().__init__()
-        # weight is stored as (out_features, in_features)
-        self.weight = weight
+class LinearDiagProp(LinearTraceProp):
+    """Diagonal propagation through z = W h + b. Same rule as the trace, but
+    the diagonal has the same shape as the Jacobian, so it uses the same
+    matmul."""
 
-    def forward(self, jacobian, diag):
-        weight = self.weight.to(jacobian)
-        jacobian_out = weight.matmul(jacobian)
-        diag_out = weight.matmul(diag)
-        return jacobian_out, diag_out
+    def map_state(self, state, weight):
+        return weight.matmul(state)
 
 
 class MatMulGrad(Module):

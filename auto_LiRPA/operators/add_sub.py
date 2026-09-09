@@ -120,12 +120,8 @@ class BoundAdd(Bound):
             grad1 = None
         return [grad0, grad1]
 
-    def build_hessian_trace_node(self, input_states):
-        return _build_add_trace_node(self, input_states, (1.0, 1.0))
-
-    def build_hessian_diag_node(self, input_states):
-        # addition is elementwise on both states, so the trace prop applies
-        return _build_add_trace_node(self, input_states, (1.0, 1.0))
+    def build_hessian_state_node(self, input_states, kind):
+        return _build_add_state_node(self, input_states, kind, (1.0, 1.0))
 
 
 class BoundSub(Bound):
@@ -224,47 +220,44 @@ class BoundSub(Bound):
             grad1 = None
         return [grad0, grad1]
 
-    def build_hessian_trace_node(self, input_states):
-        return _build_add_trace_node(self, input_states, (1.0, -1.0))
-
-    def build_hessian_diag_node(self, input_states):
-        # subtraction is elementwise on both states, so the trace prop applies
-        return _build_add_trace_node(self, input_states, (1.0, -1.0))
+    def build_hessian_state_node(self, input_states, kind):
+        return _build_add_state_node(self, input_states, kind, (1.0, -1.0))
 
 
-def _build_add_trace_node(node, input_states, signs):
-    """Shared trace builder for Add and Sub. An addition has no curvature, so
-    states pass through with their signs; a constant operand contributes
-    nothing to either state."""
+def _build_add_state_node(node, input_states, kind, signs):
+    """Shared builder for Add and Sub. An addition has no curvature, so both
+    states pass through with their sign, and a constant operand adds nothing.
+    This is elementwise, so the trace and diagonal graphs use the same rule."""
     for state, inp in zip(input_states, node.inputs):
         if state is not None and inp.output_shape != node.output_shape:
             raise NotImplementedError(
-                'Hessian trace propagation does not support broadcasting a '
+                f'Hessian {kind} propagation does not support broadcasting a '
                 'perturbed operand of an addition yet.')
     used_signs = tuple(
         sign for sign, state in zip(signs, input_states) if state is not None)
     args = tuple(
         dummy for state in input_states if state is not None for dummy in state)
-    return AddTraceProp(used_signs), args, []
+    prop = select_state_prop(kind, AddStateProp)
+    return prop(used_signs), args, []
 
 
-class AddTraceProp(Module):
+class AddStateProp(Module):
     def __init__(self, signs):
         super().__init__()
         self.signs = signs
 
     def forward(self, *states):
         jacobian_out = None
-        trace_out = None
-        for sign, (jacobian, trace) in zip(
+        state_out = None
+        for sign, (jacobian, state) in zip(
                 self.signs, zip(states[::2], states[1::2])):
-            term_jac = jacobian if sign == 1.0 else sign * jacobian
-            term_trace = trace if sign == 1.0 else sign * trace
-            jacobian_out = (
-                term_jac if jacobian_out is None else jacobian_out + term_jac)
-            trace_out = (
-                term_trace if trace_out is None else trace_out + term_trace)
-        return jacobian_out, trace_out
+            term_jacobian = jacobian if sign == 1.0 else sign * jacobian
+            term_state = state if sign == 1.0 else sign * state
+            jacobian_out = (term_jacobian if jacobian_out is None
+                            else jacobian_out + term_jacobian)
+            state_out = (term_state if state_out is None
+                         else state_out + term_state)
+        return jacobian_out, state_out
 
 
 class AddGrad(Module):

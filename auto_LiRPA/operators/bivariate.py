@@ -491,41 +491,24 @@ class BoundMul(BoundOptimizableActivation):
             grad_upstream, hessian_upstream, self.inputs[0].forward_value)
         return [None, (hessian_node, hessian_input, [self.inputs[0]])]
 
-    def build_hessian_trace_node(self, input_states):
+    def build_hessian_state_node(self, input_states, kind):
         for state, inp in zip(input_states, self.inputs):
             if state is not None and inp.output_shape != self.output_shape:
                 raise NotImplementedError(
-                    'Hessian trace propagation for BoundMul does not support '
-                    'broadcasting a perturbed input yet.')
+                    f'Hessian {kind} propagation for BoundMul does not '
+                    'support broadcasting a perturbed input yet.')
+        prop = select_state_prop(kind, MulTraceProp, MulDiagProp)
 
         if input_states[0] is not None and input_states[1] is not None:
             args = (*input_states[0], *input_states[1],
                     self.inputs[0].forward_value, self.inputs[1].forward_value)
-            return (MulTraceProp(both_perturbed=True), args,
+            return (prop(both_perturbed=True), args,
                     [self.inputs[0], self.inputs[1]])
 
         state_index = 0 if input_states[0] is not None else 1
         factor_node = self.inputs[1 - state_index]
         args = (*input_states[state_index], factor_node.forward_value)
-        return MulTraceProp(both_perturbed=False), args, [factor_node]
-
-    def build_hessian_diag_node(self, input_states):
-        for state, inp in zip(input_states, self.inputs):
-            if state is not None and inp.output_shape != self.output_shape:
-                raise NotImplementedError(
-                    'Hessian diag propagation for BoundMul does not support '
-                    'broadcasting a perturbed input yet.')
-
-        if input_states[0] is not None and input_states[1] is not None:
-            args = (*input_states[0], *input_states[1],
-                    self.inputs[0].forward_value, self.inputs[1].forward_value)
-            return (MulDiagProp(both_perturbed=True), args,
-                    [self.inputs[0], self.inputs[1]])
-
-        state_index = 0 if input_states[0] is not None else 1
-        factor_node = self.inputs[1 - state_index]
-        args = (*input_states[state_index], factor_node.forward_value)
-        return MulDiagProp(both_perturbed=False), args, [factor_node]
+        return prop(both_perturbed=False), args, [factor_node]
 
 
 class MulGrad(Module):

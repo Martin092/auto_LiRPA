@@ -732,6 +732,56 @@ class BoundPow(BoundSShaped):
             self.cstr_interval = (self.cstr_lower, self.cstr_upper)
 
 
+def expand_until_valid(check, point, step):
+    """Move the entries of ``point`` that fail ``check`` by ``step``, until
+    the check passes everywhere.
+
+    This finds a starting point for a tangent search. ``check(d)`` asks if the
+    tangent at ``d`` is still a valid bound, and ``step`` moves ``d`` toward
+    the region where it is.
+    """
+    while True:
+        checked = check(point)
+        if checked.all():
+            return point
+        point = torch.where(checked, point, step(point))
+
+
+def bisect_tangent(check, valid, invalid, max_iter=100):
+    """Binary search between ``valid`` and ``invalid``.
+
+    ``check`` must be true at ``valid`` and false at ``invalid``, and must not
+    flip back and forth in between. Returns the tightest point where it is
+    still true, so the tangent there is still a valid bound.
+    """
+    for _ in range(max_iter):
+        mid = (valid + invalid) / 2
+        checked = check(mid)
+        valid = torch.where(checked, mid, valid)
+        invalid = torch.where(checked, invalid, mid)
+    return valid
+
+
+def interval_bounds_with_extreme_points(func, lower, upper, extreme_points):
+    """IBP for a function that only turns at the given extreme points.
+
+    The output range comes from the two endpoints plus every extreme point
+    that lies inside the interval.
+    """
+    lower_value, upper_value = func(lower), func(upper)
+    bound_lower = torch.min(lower_value, upper_value)
+    bound_upper = torch.max(lower_value, upper_value)
+    for point in extreme_points:
+        point = lower.new_tensor(point)
+        value = func(point).expand_as(bound_lower)
+        mask = torch.logical_and(lower <= point, upper >= point)
+        bound_lower = torch.where(
+            mask, torch.min(bound_lower, value), bound_lower)
+        bound_upper = torch.where(
+            mask, torch.max(bound_upper, value), bound_upper)
+    return bound_lower, bound_upper
+
+
 def dtanh(x):
     return 1 - torch.tanh(x).pow(2)
 
@@ -782,15 +832,9 @@ class BoundTanh(BoundSShaped):
         grad_extra_nodes = [self.inputs[0]]
         return [(node_grad, grad_input, grad_extra_nodes)]
 
-    def build_hessian_trace_node(self, input_states):
-        jacobian, trace = input_states[0]
-        args = (jacobian, trace, self.inputs[0].forward_value)
-        return TanhTraceProp(), args, [self.inputs[0]]
-
-    def build_hessian_diag_node(self, input_states):
-        jacobian, diag = input_states[0]
-        args = (jacobian, diag, self.inputs[0].forward_value)
-        return TanhDiagProp(), args, [self.inputs[0]]
+    def build_hessian_state_node(self, input_states, kind):
+        return build_elementwise_state_node(
+            self, input_states, kind, TanhTraceProp, TanhDiagProp)
 
 
 class TanhGradOp(Function):
@@ -823,13 +867,26 @@ class TanhSecondGrad(Module):
         return g * TanhSecondGradOp.apply(preact).unsqueeze(1)
 
 
-class ActivationTraceProp(Module):
-    """Forward trace propagation through an elementwise activation s(z).
+def build_elementwise_state_node(node, input_states, kind,
+                                 trace_cls, diag_cls, **prop_kwargs):
+    """Shared builder for elementwise activations.
 
-    The Jacobian scales row-wise by s'(z) and the trace picks up the curvature
-    term: t'_k = s'(z_k) t_k + s''(z_k) ||J_k||^2. The squared row norms go
-    through BoundSqr, whose convex relaxation is exact. Subclasses provide the
-    derivative ops so they get their dedicated relaxations.
+    Both states depend on the pre-activation only, so the trace and diagonal
+    graphs differ just in which module is returned.
+    """
+    jacobian, state = input_states[0]
+    args = (jacobian, state, node.inputs[0].forward_value)
+    prop = select_state_prop(kind, trace_cls, diag_cls)
+    return prop(**prop_kwargs), args, [node.inputs[0]]
+
+
+class ActivationTraceProp(Module):
+    """Trace propagation through an elementwise activation s(z).
+
+    Each row of the Jacobian is scaled by s'(z), and the trace gains a
+    curvature term: t'_k = s'(z_k) t_k + s''(z_k) ||J_k||^2. The squared row
+    norms go through BoundSqr, whose relaxation is exact. Subclasses give the
+    derivative ops so each keeps its own relaxation.
     """
 
     def d1(self, preact):
@@ -851,11 +908,11 @@ class ActivationTraceProp(Module):
 
 
 class ActivationDiagProp(ActivationTraceProp):
-    """Forward Hessian-diagonal propagation through an elementwise activation:
-    the trace rule with the reduction over input dimensions deferred,
-    D'_k = s'(z_k) D_k + s''(z_k) (J_k . J_k). Both states keep the Jacobian
-    layout (batch, features, input_dim); the elementwise square goes through
-    the same exact BoundSqr relaxation as the trace's squared row norms."""
+    """Diagonal propagation through an elementwise activation. Same rule as
+    the trace without the sum over input dimensions,
+    D'_k = s'(z_k) D_k + s''(z_k) (J_k . J_k). Both states have the Jacobian
+    shape (batch, features, input_dim), and the square uses the same exact
+    BoundSqr relaxation."""
 
     def forward(self, jacobian, diag, preact):
         preact = preact.flatten(1) if preact.ndim > 2 else preact
@@ -895,16 +952,9 @@ class BoundTanhSecondGrad(BoundOptimizableActivation):
         return d2tanh(x)
 
     def interval_propagate(self, *v):
-        lower, upper = v[0]
-        fl, fu = d2tanh(lower), d2tanh(upper)
-        bound_lower = torch.min(fl, fu)
-        bound_upper = torch.max(fl, fu)
-        for xp in [-self.extreme_point, self.extreme_point]:
-            val = d2tanh(lower.new_tensor(xp)).expand_as(bound_lower)
-            mask = (lower <= xp) & (upper >= xp)
-            bound_lower = torch.where(mask, torch.min(bound_lower, val), bound_lower)
-            bound_upper = torch.where(mask, torch.max(bound_upper, val), bound_upper)
-        return bound_lower, bound_upper
+        return interval_bounds_with_extreme_points(
+            self.forward, v[0][0], v[0][1],
+            [-self.extreme_point, self.extreme_point])
 
     def bound_relax(self, x, init=False, dim_opt=None):
         if init:
@@ -1007,53 +1057,32 @@ class BoundTanhGrad(BoundOptimizableActivation):
         self.d_lower = torch.zeros_like(self.precompute_x)
         self.d_upper = torch.zeros_like(self.precompute_x)
 
-        # upper point that needs lower precomputed tangent line
+        # Upper endpoints that need a precomputed lower tangent. The tangent
+        # comes from the convex tail left of -inflection_point, so start at
+        # -2*inflection_point and move further left until it is valid, then
+        # tighten it back toward -inflection_point.
         mask_need_d_lower = self.precompute_x >= -self.inflection_point
-        upper = self.precompute_x[mask_need_d_lower] 
-        # 1. Initial guess, the tangent is at -2*inflection_point (should be between (-inf, -inflection_point))
-        r = -self.inflection_point * torch.ones_like(upper)
-        l = -2 * self.inflection_point * torch.ones_like(upper)
-        while True:
-            # Check if the tangent line at the guessed point is an lower bound at f(upper).
-            checked = check_lower(upper, l).int()
-            # If the initial guess is not smaller enough, then double it (-2, -4, etc).
-            l = checked * l + (1 - checked) * (l * 2)
-            if checked.sum() == l.numel():
-                break
-        # Now we have starting point at l, its tangent line is guaranteed to be an lower bound at f(upper).
-        # We want to further tighten this bound by moving it closer to upper.
-        for _ in range(max_iter):
-            # Binary search.
-            m = (l + r) / 2
-            checked = check_lower(upper, m).int()
-            l = checked * m + (1 - checked) * l
-            r = checked * r + (1 - checked) * m
-        # At upper, a line with slope l is guaranteed to lower bound the function.
-        self.d_lower[mask_need_d_lower] = l.clone()
+        upper = self.precompute_x[mask_need_d_lower]
+        valid = expand_until_valid(
+            lambda d: check_lower(upper, d),
+            -2 * self.inflection_point * torch.ones_like(upper),
+            lambda point: point * 2)
+        self.d_lower[mask_need_d_lower] = bisect_tangent(
+            lambda d: check_lower(upper, d), valid,
+            -self.inflection_point * torch.ones_like(upper), max_iter)
 
-        # upper point that needs upper precomputed tangent line
+        # Upper endpoints that need a precomputed upper tangent. That tangent
+        # lies in (0, inflection_point), so start halfway and shrink toward 0
+        # until it is valid, then tighten it back toward inflection_point.
         mask_need_upper_d = self.precompute_x >= self.inflection_point
         upper = self.precompute_x[mask_need_upper_d]
-        # 1. Initial guess, the tangent is at inflection_point/2 (should be between (0, inflection_point))
-        r = self.inflection_point * torch.ones_like(upper)
-        l = self.inflection_point / 2 * torch.ones_like(upper)
-        while True:
-            # Check if the tangent line at the guessed point is an upper bound at f(upper).
-            checked = check_upper(upper, l).int()
-            # If the initial guess is not smaller enough, then reduce it.
-            l = checked * l + (1 - checked) * (l / 2)
-            if checked.sum() == l.numel():
-                break
-        # Now we have starting point at l, its tangent line is guaranteed to be an upper bound at f(upper).
-        # We want to further tighten this bound by moving it closer to upper.
-        for _ in range(max_iter):
-            # Binary search.
-            m = (l + r) / 2
-            checked = check_upper(upper, m).int()
-            l = checked * m + (1 - checked) * l
-            r = checked * r + (1 - checked) * m
-        # At upper, a line with slope l is guaranteed to upper bound the function.
-        self.d_upper[mask_need_upper_d] = l.clone()
+        valid = expand_until_valid(
+            lambda d: check_upper(upper, d),
+            self.inflection_point / 2 * torch.ones_like(upper),
+            lambda point: point / 2)
+        self.d_upper[mask_need_upper_d] = bisect_tangent(
+            lambda d: check_upper(upper, d), valid,
+            self.inflection_point * torch.ones_like(upper), max_iter)
 
     def retrieve_from_precompute(self, x, flip=False):
         if not flip:
@@ -1281,15 +1310,9 @@ class BoundSigmoid(BoundTanh):
             grad_upstream, hessian_upstream, self.inputs[0].forward_value)
         return [(hessian_node, hessian_input, [self.inputs[0]])]
 
-    def build_hessian_trace_node(self, input_states):
-        jacobian, trace = input_states[0]
-        args = (jacobian, trace, self.inputs[0].forward_value)
-        return SigmoidTraceProp(), args, [self.inputs[0]]
-
-    def build_hessian_diag_node(self, input_states):
-        jacobian, diag = input_states[0]
-        args = (jacobian, diag, self.inputs[0].forward_value)
-        return SigmoidDiagProp(), args, [self.inputs[0]]
+    def build_hessian_state_node(self, input_states, kind):
+        return build_elementwise_state_node(
+            self, input_states, kind, SigmoidTraceProp, SigmoidDiagProp)
 
 
 class SigmoidGradOp(Function):
@@ -1370,19 +1393,41 @@ class BoundCenteredSigmoidSquared(BoundSShaped):
             'Gradient node for centered sigmoid squared is not implemented.')
 
 
-class SigmoidHessian(Module):
+class ElementwiseHessianProp(Module):
+    """Hessian propagation backwards through an elementwise activation s(z).
+
+    For y = s(z) the chain rule gives
+
+        grad'_i    = grad_i s'(z_i)
+        hess'_ij   = s'(z_i) s'(z_j) hess_ij + delta_ij grad_i s''(z_i)
+
+    The first term is split in two. On the diagonal it holds s'(z)^2, which
+    has a tight square relaxation. Off the diagonal it is a product of two
+    different variables. Subclasses give the derivative ops, so each one keeps
+    its own relaxation.
+    """
+
     def __init__(self, dim=None, dtype=None, device=None):
         super().__init__()
         self.register_buffer(
             'eye', torch.eye(dim, dtype=dtype, device=device))
 
+    def d1(self, preact):
+        raise NotImplementedError
+
+    def d1_sq(self, preact):
+        """s'(z)^2. It traces as Pow(x, 2), which convert_sqr turns into
+        BoundSqr. That is tighter than BoundMul, which would treat d1 * d1 as
+        two independent variables."""
+        return self.d1(preact) ** 2
+
+    def d2(self, preact):
+        raise NotImplementedError
+
     def forward(self, grad_last, hessian_last, preact):
-        d1 = SigmoidGradOp.apply(preact)
-        d2 = SigmoidSecondGradOp.apply(preact)
-        # d1 ** 2 traces as BoundPow(x, 2), which convert_sqr replaces with
-        # BoundSqr — tighter than treating d1*d1 as two independent variables
-        # in BoundMul (McCormick).
-        d1_sq = d1 ** 2
+        d1 = self.d1(preact)
+        d1_sq = self.d1_sq(preact)
+        d2 = self.d2(preact)
 
         grad_input = grad_last * d1.unsqueeze(1)
 
@@ -1400,6 +1445,14 @@ class SigmoidHessian(Module):
         diagonal_term = (grad_last * d2.unsqueeze(1)).unsqueeze(-1) * self.eye
         hessian_input = h_diag_scaled + h_offdiag + diagonal_term
         return grad_input, hessian_input
+
+
+class SigmoidHessian(ElementwiseHessianProp):
+    def d1(self, preact):
+        return SigmoidGradOp.apply(preact)
+
+    def d2(self, preact):
+        return SigmoidSecondGradOp.apply(preact)
 
 
 class BoundSigmoidSecondGrad(BoundOptimizableActivation):
@@ -1453,20 +1506,9 @@ class BoundSigmoidSecondGrad(BoundOptimizableActivation):
         return self._interval_bounds(v[0][0], v[0][1])
 
     def _interval_bounds(self, lower, upper):
-        lower_value = self.forward(lower)
-        upper_value = self.forward(upper)
-        bound_lower = torch.min(lower_value, upper_value)
-        bound_upper = torch.max(lower_value, upper_value)
-
-        for point in [
-                lower.new_tensor(-self.extreme_point),
-                lower.new_tensor(self.extreme_point)]:
-            value = self.forward(point).expand_as(bound_lower)
-            mask = torch.logical_and(lower <= point, upper >= point)
-            bound_lower = torch.where(mask, torch.min(bound_lower, value), bound_lower)
-            bound_upper = torch.where(mask, torch.max(bound_upper, value), bound_upper)
-
-        return bound_lower, bound_upper
+        return interval_bounds_with_extreme_points(
+            self.forward, lower, upper,
+            [-self.extreme_point, self.extreme_point])
 
     @torch.no_grad()
     def precompute_relaxation(self, x_limit=500):
@@ -1534,19 +1576,13 @@ class BoundSigmoidSecondGrad(BoundOptimizableActivation):
         mask_left_d_lower = torch.logical_and(
             self.precompute_x >= -a, self.precompute_x < 0)
         upper = self.precompute_x[mask_left_d_lower]
-        right = upper.new_full(upper.shape, -a)
-        left = upper.new_full(upper.shape, -2 * a)
-        while True:
-            checked = check_lower(upper, left)
-            left = torch.where(checked, left, -a + 2 * (left + a))
-            if checked.all():
-                break
-        for _ in range(max_iter):
-            mid = (left + right) / 2
-            checked = check_lower(upper, mid)
-            left = torch.where(checked, mid, left)
-            right = torch.where(checked, right, mid)
-        self.d_lower[mask_left_d_lower] = left
+        left = expand_until_valid(
+            lambda d: check_lower(upper, d),
+            upper.new_full(upper.shape, -2 * a),
+            lambda point: -a + 2 * (point + a))
+        self.d_lower[mask_left_d_lower] = bisect_tangent(
+            lambda d: check_lower(upper, d), left,
+            upper.new_full(upper.shape, -a), max_iter)
         self.has_d_lower[mask_left_d_lower] = True
 
         # Nonnegative upper endpoints need an upper tangent from the central
@@ -1554,14 +1590,9 @@ class BoundSigmoidSecondGrad(BoundOptimizableActivation):
         # threshold.
         mask_d_upper = self.precompute_x >= 0
         upper = self.precompute_x[mask_d_upper]
-        left = upper.new_full(upper.shape, -e)
-        right = torch.zeros_like(upper)
-        for _ in range(max_iter):
-            mid = (left + right) / 2
-            checked = check_upper(upper, mid)
-            left = torch.where(checked, mid, left)
-            right = torch.where(checked, right, mid)
-        self.d_upper[mask_d_upper] = left
+        self.d_upper[mask_d_upper] = bisect_tangent(
+            lambda d: check_upper(upper, d),
+            upper.new_full(upper.shape, -e), torch.zeros_like(upper), max_iter)
         self.has_d_upper[mask_d_upper] = True
 
         # Far-right upper endpoints additionally need a lower tangent from the
@@ -1569,14 +1600,10 @@ class BoundSigmoidSecondGrad(BoundOptimizableActivation):
         # this threshold.
         mask_right_d_lower = self.precompute_x >= a
         upper = self.precompute_x[mask_right_d_lower]
-        left = upper.new_full(upper.shape, e)
-        right = upper.new_full(upper.shape, a)
-        for _ in range(max_iter):
-            mid = (left + right) / 2
-            checked = check_lower(upper, mid)
-            left = torch.where(checked, mid, left)
-            right = torch.where(checked, right, mid)
-        self.d_lower[mask_right_d_lower] = left
+        self.d_lower[mask_right_d_lower] = bisect_tangent(
+            lambda d: check_lower(upper, d),
+            upper.new_full(upper.shape, e),
+            upper.new_full(upper.shape, a), max_iter)
         self.has_d_lower[mask_right_d_lower] = True
 
         logger.debug('Done')
