@@ -28,6 +28,7 @@ bound_op_map = {
     'grad::direct_hessian': BoundDirectHessianOP,
     'grad::double_jacobian': BoundDoubleJacobianOP,
     'grad::direct_hessian_trace': BoundDirectHessianTraceOP,
+    'grad::direct_hessian_diag': BoundDirectHessianDiagOP,
     'grad::Tanh': BoundTanhGrad,
     'grad::TanhSecondGrad': BoundTanhSecondGrad,
     'grad::Sigmoid': BoundSigmoidGrad,

@@ -26,7 +26,7 @@ dot product of the two Jacobians. Because propagation runs forwards, fan-out
 needs no accumulation (consumers share the producer's state) and fan-in is
 handled inside each op's builder.
 
-Usage mirrors the Hessian markers:
+The same recursion carries the full Hessian diagonal instead of its sum;\nsee hessian_diag.py, which shares the graph construction below through\nbuild_forward_state_graph.\n\nUsage mirrors the Hessian markers:
 
     class TraceWrapper(nn.Module):
         def forward(self, x):
@@ -78,6 +78,21 @@ def _expand_hessian_trace(self):
 
 def build_hessian_trace_graph(self, output_node, input_node, prefix=None):
     prefix = f'/hessian_trace{output_node.name}' if prefix is None else prefix
+    return build_forward_state_graph(
+        self, output_node, input_node, prefix=prefix,
+        builder_attr='build_hessian_trace_node',
+        state_init_cls=BoundHessianTraceInit,
+        state_dummy_shape=lambda batch, dim: (batch, dim),
+        state_label='trace')
+
+
+def build_forward_state_graph(self, output_node, input_node, prefix,
+                              builder_attr, state_init_cls,
+                              state_dummy_shape, state_label):
+    """Expand a forward (Jacobian, state) propagation graph from input_node to
+    output_node. The state is the per-coordinate Hessian trace or diagonal;
+    each op supplies its local rule through the method named builder_attr.
+    Returns the state node of the output."""
 
     # Everything the output depends on; state spreads from the input node
     # through this cone only.
@@ -111,12 +126,12 @@ def build_hessian_trace_graph(self, output_node, input_node, prefix=None):
             if indegree[child] == 0:
                 order.append(child)
 
-    # Initial state at the input node: identity Jacobian, zero traces.
+    # Initial state at the input node: identity Jacobian, zero trace/diagonal.
     jacobian_init = BoundJacobianInit(inputs=[input_node])
     jacobian_init.name = f'{prefix}{input_node.name}/jacobian'
-    trace_init = BoundHessianTraceInit(inputs=[input_node])
-    trace_init.name = f'{prefix}{input_node.name}/trace'
-    self.add_nodes([jacobian_init, trace_init])
+    state_init = state_init_cls(inputs=[input_node])
+    state_init.name = f'{prefix}{input_node.name}/{state_label}'
+    self.add_nodes([jacobian_init, state_init])
 
     batch_size = input_node.output_shape[0]
     input_dim = prod(input_node.output_shape[1:])
@@ -124,12 +139,13 @@ def build_hessian_trace_graph(self, output_node, input_node, prefix=None):
     dtype = forward_value.dtype if isinstance(forward_value, torch.Tensor) else None
     jacobian_dummy = torch.ones(
         batch_size, input_dim, input_dim, dtype=dtype, device=self.device)
-    trace_dummy = torch.ones(
-        batch_size, input_dim, dtype=dtype, device=self.device)
+    state_dummy = torch.ones(
+        *state_dummy_shape(batch_size, input_dim),
+        dtype=dtype, device=self.device)
 
-    # name -> (jacobian node, trace node, jacobian dummy, trace dummy)
-    state = {input_node.name: (jacobian_init, trace_init,
-                               jacobian_dummy, trace_dummy)}
+    # name -> (jacobian node, state node, jacobian dummy, state dummy)
+    state = {input_node.name: (jacobian_init, state_init,
+                               jacobian_dummy, state_dummy)}
 
     for name in topological:
         node = self._modules[name]
@@ -146,22 +162,22 @@ def build_hessian_trace_graph(self, output_node, input_node, prefix=None):
             state[name] = state[source]
             continue
 
-        logger.debug(f'Building hessian trace node for {node}')
+        logger.debug(f'Building {state_label} propagation node for {node}')
 
         input_states = [
             state[inp.name][2:] if inp.name in state else None
             for inp in node.inputs]
-        module, args, deps = node.build_hessian_trace_node(input_states)
+        module, args, deps = getattr(node, builder_attr)(input_states)
 
         with torch.no_grad():
-            jacobian_dummy, trace_dummy = module(*args)
+            jacobian_dummy, state_dummy = module(*args)
 
         nodes_op, nodes_in, nodes_out, _ = self._convert_nodes(
             module, tuple(arg.detach() for arg in args))
         if len(nodes_out) != 2:
             raise RuntimeError(
-                f'Hessian trace propagation node for {node} must return '
-                f'(jacobian, trace), got {len(nodes_out)} outputs.')
+                f'{state_label} propagation node for {node} must return '
+                f'(jacobian, {state_label}), got {len(nodes_out)} outputs.')
 
         # The first arguments are the states of the state-carrying inputs, in
         # input order; then the deps; anything left over is a parameter or
@@ -173,7 +189,7 @@ def build_hessian_trace_graph(self, output_node, input_node, prefix=None):
         replacements = state_nodes + deps
         if len(nodes_in) < len(replacements):
             raise RuntimeError(
-                f'Hessian trace propagation node for {node} consumed '
+                f'{state_label} propagation node for {node} consumed '
                 f'{len(nodes_in)} inputs but {len(replacements)} were wired.')
 
         rename_dict = {}
@@ -186,9 +202,9 @@ def build_hessian_trace_graph(self, output_node, input_node, prefix=None):
         for op in nodes_op:
             if op.name not in rename_dict:
                 rename_dict[op.name] = f'{prefix}{node.name}/tmp{op.name}'
-        jacobian_out, trace_out = nodes_out
+        jacobian_out, state_out = nodes_out
         rename_dict[jacobian_out.name] = f'{prefix}{node.name}/jacobian'
-        rename_dict[trace_out.name] = f'{prefix}{node.name}/trace'
+        rename_dict[state_out.name] = f'{prefix}{node.name}/{state_label}'
 
         self.rename_nodes(nodes_op, nodes_in, rename_dict)
         for i, replacement in enumerate(replacements):
@@ -198,12 +214,12 @@ def build_hessian_trace_graph(self, output_node, input_node, prefix=None):
                         op.inputs[j] = replacement
         self.add_nodes(nodes_op + nodes_in[len(replacements):])
 
-        state[name] = (jacobian_out, trace_out, jacobian_dummy, trace_dummy)
+        state[name] = (jacobian_out, state_out, jacobian_dummy, state_dummy)
 
     if output_node.name not in state:
         raise RuntimeError(
             f'Output node {output_node.name} does not depend on the input; '
-            'the Hessian trace graph could not be built.')
+            f'the {state_label} propagation graph could not be built.')
     return state[output_node.name][1]
 
 

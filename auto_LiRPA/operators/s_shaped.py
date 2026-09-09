@@ -787,6 +787,11 @@ class BoundTanh(BoundSShaped):
         args = (jacobian, trace, self.inputs[0].forward_value)
         return TanhTraceProp(), args, [self.inputs[0]]
 
+    def build_hessian_diag_node(self, input_states):
+        jacobian, diag = input_states[0]
+        args = (jacobian, diag, self.inputs[0].forward_value)
+        return TanhDiagProp(), args, [self.inputs[0]]
+
 
 class TanhGradOp(Function):
     @staticmethod
@@ -845,12 +850,32 @@ class ActivationTraceProp(Module):
         return jacobian_out, trace_out
 
 
+class ActivationDiagProp(ActivationTraceProp):
+    """Forward Hessian-diagonal propagation through an elementwise activation:
+    the trace rule with the reduction over input dimensions deferred,
+    D'_k = s'(z_k) D_k + s''(z_k) (J_k . J_k). Both states keep the Jacobian
+    layout (batch, features, input_dim); the elementwise square goes through
+    the same exact BoundSqr relaxation as the trace's squared row norms."""
+
+    def forward(self, jacobian, diag, preact):
+        preact = preact.flatten(1) if preact.ndim > 2 else preact
+        d1 = self.d1(preact)
+        d2 = self.d2(preact)
+        jacobian_out = jacobian * d1.unsqueeze(-1)
+        diag_out = d1.unsqueeze(-1) * diag + d2.unsqueeze(-1) * jacobian ** 2
+        return jacobian_out, diag_out
+
+
 class TanhTraceProp(ActivationTraceProp):
     def d1(self, preact):
         return TanhGradOp.apply(preact)
 
     def d2(self, preact):
         return TanhSecondGradOp.apply(preact)
+
+
+class TanhDiagProp(ActivationDiagProp, TanhTraceProp):
+    pass
 
 
 class BoundTanhSecondGrad(BoundOptimizableActivation):
@@ -1261,6 +1286,11 @@ class BoundSigmoid(BoundTanh):
         args = (jacobian, trace, self.inputs[0].forward_value)
         return SigmoidTraceProp(), args, [self.inputs[0]]
 
+    def build_hessian_diag_node(self, input_states):
+        jacobian, diag = input_states[0]
+        args = (jacobian, diag, self.inputs[0].forward_value)
+        return SigmoidDiagProp(), args, [self.inputs[0]]
+
 
 class SigmoidGradOp(Function):
     @staticmethod
@@ -1299,6 +1329,10 @@ class SigmoidTraceProp(ActivationTraceProp):
 
     def d2(self, preact):
         return SigmoidSecondGradOp.apply(preact)
+
+
+class SigmoidDiagProp(ActivationDiagProp, SigmoidTraceProp):
+    pass
 
 
 class CenteredSigmoidSquaredOp(Function):

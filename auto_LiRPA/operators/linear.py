@@ -1004,6 +1004,29 @@ class BoundLinear(BoundOptimizableActivation):
             w = w.t()
         return LinearTraceProp(w.detach()), input_states[0], []
 
+    def build_hessian_diag_node(self, input_states):
+        if self.is_input_perturbed(1):
+            raise NotImplementedError(
+                'Hessian diag propagation for weight perturbation is not '
+                'supported yet.')
+        if input_states[0] is None:
+            raise NotImplementedError(
+                'Hessian diag propagation through a linear layer expects the '
+                'state on the data input.')
+        if len(self.inputs[0].output_shape) != 2:
+            raise NotImplementedError(
+                'Hessian diag propagation through a linear layer only '
+                'supports flat (batch, features) inputs.')
+        if isinstance(self.inputs[1], BoundParams):
+            w = self.inputs[1].param
+        elif isinstance(self.inputs[1], BoundBuffers):
+            w = self.inputs[1].buffer
+        else:
+            w = self.inputs[1].value
+        if not self.transB:
+            w = w.t()
+        return LinearDiagProp(w.detach()), input_states[0], []
+
     def update_requires_input_bounds(self):
         self._check_weight_perturbation()
 
@@ -1022,6 +1045,21 @@ class BoundMatMul(BoundLinear):
         return x.matmul(y)
 
     def interval_propagate(self, *v, C=None):
+        if (C is None and not self.is_input_perturbed(0)
+                and self.is_input_perturbed(1)):
+            # Constant left operand times a perturbed right operand, e.g. the
+            # W @ J and W @ D steps of the Hessian trace/diag graphs. The
+            # parent class only recognizes a constant on input 1 and would
+            # fall into the generic bilinear relaxation, which broadcasts a
+            # [batch, out, in, ...] product tensor and exhausts memory for
+            # wide layers. The exact interval image of a constant matrix is
+            # center = A @ mid, deviation = |A| @ diff.
+            A = v[0][0]
+            y_l, y_u = v[1]
+            mid, diff = (y_l + y_u) / 2, (y_u - y_l) / 2
+            center = A.matmul(mid)
+            deviation = A.abs().matmul(diff)
+            return center - deviation, center + deviation
         lower, upper = super().interval_propagate(*v, C=C)
         return lower, upper
 
@@ -1128,6 +1166,10 @@ class BoundNeg(Bound):
     def build_hessian_trace_node(self, input_states):
         return NegTraceProp(), input_states[0], []
 
+    def build_hessian_diag_node(self, input_states):
+        # negation is elementwise on both states, so the trace prop applies
+        return NegTraceProp(), input_states[0], []
+
 
 class NegGrad(Module):
     def forward(self, grad_last):
@@ -1214,6 +1256,23 @@ class LinearTraceProp(Module):
         jacobian_out = weight.matmul(jacobian)
         trace_out = F.linear(trace, weight)
         return jacobian_out, trace_out
+
+
+class LinearDiagProp(Module):
+    """Forward Hessian-diagonal propagation through z = W h + b. The layer has
+    no curvature, so both states map linearly: J' = W J and D' = W D, with the
+    diag state in the same (batch, features, input_dim) layout as the
+    Jacobian."""
+    def __init__(self, weight):
+        super().__init__()
+        # weight is stored as (out_features, in_features)
+        self.weight = weight
+
+    def forward(self, jacobian, diag):
+        weight = self.weight.to(jacobian)
+        jacobian_out = weight.matmul(jacobian)
+        diag_out = weight.matmul(diag)
+        return jacobian_out, diag_out
 
 
 class MatMulGrad(Module):

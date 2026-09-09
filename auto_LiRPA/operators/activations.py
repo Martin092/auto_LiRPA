@@ -20,7 +20,8 @@ import torch
 from torch.nn import Module
 
 from .s_shaped import (
-    ActivationTraceProp, CenteredSigmoidSquaredOp, SIGMOID_SQUARED_INFLECTION,
+    ActivationDiagProp, ActivationTraceProp, CenteredSigmoidSquaredOp,
+    SIGMOID_SQUARED_INFLECTION,
     SigmoidGrad, SigmoidGradOp)
 from .base import *
 from .activation_base import BoundActivation, BoundOptimizableActivation
@@ -78,6 +79,11 @@ class BoundSoftplus(BoundActivation):
         args = (jacobian, trace, self.inputs[0].forward_value)
         return SoftplusTraceProp(beta=self.softplus.beta), args, [self.inputs[0]]
 
+    def build_hessian_diag_node(self, input_states):
+        jacobian, diag = input_states[0]
+        args = (jacobian, diag, self.inputs[0].forward_value)
+        return SoftplusDiagProp(beta=self.softplus.beta), args, [self.inputs[0]]
+
 
 class SoftplusGrad(Module):
     def __init__(self, beta=1.0, threshold=20.0):
@@ -102,6 +108,10 @@ class SoftplusTraceProp(ActivationTraceProp):
 
     def d2(self, preact):
         return self.beta * SigmoidGradOp.apply(self.beta * preact)
+
+
+class SoftplusDiagProp(ActivationDiagProp, SoftplusTraceProp):
+    pass
 
 
 class SoftplusHessian(Module):

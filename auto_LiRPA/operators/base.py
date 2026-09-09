@@ -492,6 +492,26 @@ class Bound(nn.Module):
         """
         return not_implemented_op(self, 'build_hessian_trace_node')
 
+    def build_hessian_diag_node(self, input_states):
+        r"""
+        Function for building the forward-mode Hessian diagonal node.
+
+        Same contract as ``build_hessian_trace_node``, except the second state
+        is the per-output Hessian diagonal diag(d^2 out_k / d input^2), shape
+        (batch, numel, input_dim) - the trace state with the reduction over
+        input dimensions deferred.
+
+        Args:
+            input_states: A list aligned with ``self.inputs``. Each entry is a
+            ``(jacobian, diag)`` tuple of dummy tensors for inputs that carry
+            state, or ``None`` for the rest. Only shapes matter.
+
+        Returns:
+            A ``(module, args, deps)`` tuple, as in build_hessian_trace_node,
+            with ``module.forward(*args)`` returning ``(jacobian, diag)``.
+        """
+        return not_implemented_op(self, 'build_hessian_diag_node')
+
     def  build_hessian_node(self, grad_upstream, hessian_upstream):
         return not_implemented_op(self, 'build_hessian_node')
 

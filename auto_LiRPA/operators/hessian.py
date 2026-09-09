@@ -65,6 +65,22 @@ class DirectHessianTraceOP(torch.autograd.Function):
         return output.new_zeros(output.shape[0], output_.shape[-1])
 
 
+class DirectHessianDiagOP(torch.autograd.Function):
+    """Hessian diagonal via forward-mode propagation, never forming the full
+    Hessian. Returns diag(d^2 out_k / d input^2) per flattened output
+    coordinate, shape (batch, out_numel, input_numel)."""
+    @staticmethod
+    def symbolic(g, output, input):
+        return g.op('grad::direct_hessian_diag', output, input).setType(output.type())
+
+    @staticmethod
+    def forward(ctx, output, input):
+        output_ = output.flatten(1)
+        input_ = input.flatten(1)
+        return output.new_zeros(
+            output.shape[0], output_.shape[-1], input_.shape[-1])
+
+
 class BoundHessianInit(Bound):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
@@ -111,6 +127,27 @@ class BoundHessianTraceInit(Bound):
 
     def forward(self, x):
         return x.new_zeros(x.shape[0], prod(x.shape[1:]))
+
+
+class BoundDirectHessianDiagOP(Bound):
+    """Marker node for the Hessian diagonal, expanded by build_hessian_diag_graph."""
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+
+    def forward(self, output, input):
+        return DirectHessianDiagOP.apply(output, input)
+
+
+class BoundHessianDiagInit(Bound):
+    """Diag state at the input node: diag(d^2 x_k / dx^2) = 0 for every k."""
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+        self.never_perturbed = True
+        self.no_jacobian = True
+
+    def forward(self, x):
+        dim = prod(x.shape[1:])
+        return x.new_zeros(x.shape[0], dim, dim)
 
 
 class BoundHessianOutputReshape(Bound):

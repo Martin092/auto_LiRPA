@@ -123,6 +123,10 @@ class BoundAdd(Bound):
     def build_hessian_trace_node(self, input_states):
         return _build_add_trace_node(self, input_states, (1.0, 1.0))
 
+    def build_hessian_diag_node(self, input_states):
+        # addition is elementwise on both states, so the trace prop applies
+        return _build_add_trace_node(self, input_states, (1.0, 1.0))
+
 
 class BoundSub(Bound):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
@@ -221,6 +225,10 @@ class BoundSub(Bound):
         return [grad0, grad1]
 
     def build_hessian_trace_node(self, input_states):
+        return _build_add_trace_node(self, input_states, (1.0, -1.0))
+
+    def build_hessian_diag_node(self, input_states):
+        # subtraction is elementwise on both states, so the trace prop applies
         return _build_add_trace_node(self, input_states, (1.0, -1.0))
 
 

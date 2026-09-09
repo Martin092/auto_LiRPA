@@ -509,6 +509,24 @@ class BoundMul(BoundOptimizableActivation):
         args = (*input_states[state_index], factor_node.forward_value)
         return MulTraceProp(both_perturbed=False), args, [factor_node]
 
+    def build_hessian_diag_node(self, input_states):
+        for state, inp in zip(input_states, self.inputs):
+            if state is not None and inp.output_shape != self.output_shape:
+                raise NotImplementedError(
+                    'Hessian diag propagation for BoundMul does not support '
+                    'broadcasting a perturbed input yet.')
+
+        if input_states[0] is not None and input_states[1] is not None:
+            args = (*input_states[0], *input_states[1],
+                    self.inputs[0].forward_value, self.inputs[1].forward_value)
+            return (MulDiagProp(both_perturbed=True), args,
+                    [self.inputs[0], self.inputs[1]])
+
+        state_index = 0 if input_states[0] is not None else 1
+        factor_node = self.inputs[1 - state_index]
+        args = (*input_states[state_index], factor_node.forward_value)
+        return MulDiagProp(both_perturbed=False), args, [factor_node]
+
 
 class MulGrad(Module):
     def __init__(self, input_shape):
@@ -554,6 +572,34 @@ class MulTraceProp(Module):
         jacobian_out = jacobian * factor.unsqueeze(-1)
         trace_out = trace * factor
         return jacobian_out, trace_out
+
+
+class MulDiagProp(Module):
+    """Forward Hessian-diagonal propagation through z = x * y: the trace rule
+    with the row-wise Jacobian dot product replaced by the elementwise
+    product, D' = y.D_x + x.D_y + 2 J_x . J_y, all in the
+    (batch, features, input_dim) layout."""
+    def __init__(self, both_perturbed):
+        super().__init__()
+        self.both_perturbed = both_perturbed
+
+    def forward(self, *args):
+        if self.both_perturbed:
+            jac_x, diag_x, jac_y, diag_y, x, y = args
+            x = x.flatten(1) if x.ndim > 2 else x
+            y = y.flatten(1) if y.ndim > 2 else y
+            jacobian_out = y.unsqueeze(-1) * jac_x + x.unsqueeze(-1) * jac_y
+            cross = 2 * jac_x * jac_y
+            diag_out = (y.unsqueeze(-1) * diag_x + x.unsqueeze(-1) * diag_y
+                        + cross)
+            return jacobian_out, diag_out
+
+        jacobian, diag, factor = args
+        if factor.ndim > 2:
+            factor = factor.flatten(1)
+        jacobian_out = jacobian * factor.unsqueeze(-1)
+        diag_out = diag * factor.unsqueeze(-1)
+        return jacobian_out, diag_out
 
 
 class MulHessian(Module):
