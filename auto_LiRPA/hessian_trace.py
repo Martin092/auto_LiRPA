@@ -26,7 +26,11 @@ dot product of the two Jacobians. Because propagation runs forwards, fan-out
 needs no accumulation (consumers share the producer's state) and fan-in is
 handled inside each op's builder.
 
-The same recursion carries the full Hessian diagonal instead of its sum;\nsee hessian_diag.py, which shares the graph construction below through\nbuild_forward_state_graph.\n\nUsage mirrors the Hessian markers:
+The same recursion carries the full Hessian diagonal instead of its sum;
+see hessian_diag.py, which shares the graph construction below through
+build_forward_state_graph.
+
+Usage mirrors the Hessian markers:
 
     class TraceWrapper(nn.Module):
         def forward(self, x):
