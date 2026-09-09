@@ -12,7 +12,7 @@
 
 ## Hessian Bounds (this fork)
 
-This fork adds certified bounds on the **second** derivative of a network. Put
+This fork adds certified bounds on the second derivative of a network. Put
 one of four markers on the model output and it is expanded into a bound
 propagation graph when the `BoundedModule` is built:
 
@@ -24,7 +24,7 @@ propagation graph when the `BoundedModule` is built:
 | Full Hessian | `DoubleJacobianOP` | `compute_hessian_bounds` | reverse, Jacobian twice | O(m·d²) |
 
 `m` is the output size, `d` the input size. All four accept the usual `method`
-argument (`IBP`, `backward`, `alpha-CROWN`).
+argument (`IBP`, `backward`, `alpha-CROWN`, etc.).
 
 ```python
 from auto_LiRPA import BoundedModule, BoundedTensor, PerturbationLpNorm
@@ -56,7 +56,8 @@ lower, upper = bounded.compute_hessian_trace_bounds(my_input, method='backward')
   Jacobian expansion covers. `DirectHessianOP` needs a per-operator
   `build_hessian_node` and so far handles Linear, Sigmoid, Softplus,
   Reshape/Flatten and Mul with one constant operand, but not `tanh` or a product
-  of two perturbed operands.
+  of two perturbed operands. In our experience `DoubleJacobianOP` is faster and uses
+  less memory while being about as tight as `DirectHessianOP`.
 
 ### Relaxation options
 
@@ -65,14 +66,14 @@ known, so choose them to match the method you will run.
 
 * `softplus_hessian_squared_relaxation` picks how `softplus'(z)²` is relaxed.
   The default `'sqr'` is about 1 to 5% tighter under CROWN and 12% faster;
-  `'centered_sigmoid_squared'` is 4 to 14% tighter under alpha-CROWN. Under IBP
-  they agree, and the term only matters from the second activation layer on.
+  `'centered_sigmoid_squared'` is 4 to 14% tighter under alpha-CROWN.
+  With IBP changing the relaxation does nothing.
 * `sigmoid_second_grad_relaxation` picks how `sigmoid''` is relaxed. The default
   `'piecewise'` is optimizable by alpha-CROWN; `'tangent'` is fixed.
 
 New operators: `BoundTanhSecondGrad`, `BoundSigmoidSecondGrad` and
 `BoundCenteredSigmoidSquared`, plus `build_gradient_node` on `BoundTanhGrad` and
-`BoundSigmoidGrad`, which is what lets the Jacobian expansion run a second time.
+`BoundSigmoidGrad`.
 
 ## What's New?
 - [α,β-CROWN](https://github.com/Verified-Intelligence/alpha-beta-CROWN.git) (using `auto_LiRPA` as its core library) is the winner of [VNN-COMP 2025](https://sites.google.com/view/vnn2025) and is **ranked top-1** in all [scored benchmarks](https://github.com/VNN-COMP/vnncomp2025_results/blob/main/SCORING-SMALL-TOL/latex/main.pdf). (08/2025)
