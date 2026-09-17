@@ -238,6 +238,40 @@ def test_sigmoid_second_grad_piecewise_case_relaxations_are_sound():
     assert torch.all(op.uw.abs() > 1e-6)
 
 
+def test_sigmoid_second_grad_piecewise_pivot_relaxation_is_sound():
+    op = BoundSigmoidSecondGrad(
+        attr={'device': torch.device('cpu')},
+        options={'sigmoid_second_grad_relaxation': 'piecewise-pivot'})
+
+    lower = torch.tensor([
+        -4., -2., 0.2, 2.5, -4., -1., -1., 0.5,
+        -4., -1., -4., 1.5,
+    ])
+    upper = torch.tensor([
+        -3., -1., 1.0, 4.0, -1., 0.5, 3.0, 3.0,
+        -1., 0.5, 1.0, 3.0,
+    ])
+
+    class SimpleBoundedInput:
+        def __init__(self, l, u):
+            self.lower = l
+            self.upper = u
+
+    x = SimpleBoundedInput(lower, upper)
+    op.init_linear_relaxation(x)
+    op.bound_relax(x)
+
+    grid_t = torch.linspace(0., 1., steps=257).unsqueeze(1)
+    grid = lower.unsqueeze(0) + grid_t * (upper - lower).unsqueeze(0)
+    y = d2sigmoid(grid)
+    lower_line = op.lw.unsqueeze(0) * grid + op.lb.unsqueeze(0)
+    upper_line = op.uw.unsqueeze(0) * grid + op.ub.unsqueeze(0)
+
+    assert op.optimizable
+    assert torch.all(lower_line <= y + 1e-5)
+    assert torch.all(upper_line >= y - 1e-5)
+
+
 def test_sigmoid_second_grad_piecewise_relaxations_cover_boundary_grid():
     """Check soundness across intervals around all curvature breakpoints."""
     op = BoundSigmoidSecondGrad(

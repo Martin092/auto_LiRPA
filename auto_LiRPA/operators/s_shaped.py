@@ -1468,18 +1468,21 @@ class BoundSigmoidSecondGrad(BoundOptimizableActivation):
             'same-slope': 'tangent',
             'old': 'piecewise',
             's-shape': 'piecewise',
+            'pivot': 'piecewise-pivot',
         }
         self.sigmoid_second_grad_relaxation = relaxation_aliases.get(
             relaxation, relaxation)
-        if self.sigmoid_second_grad_relaxation not in ['tangent', 'piecewise']:
+        if self.sigmoid_second_grad_relaxation not in [
+                'tangent', 'piecewise', 'piecewise-pivot']:
             raise ValueError(
                 'Unsupported sigmoid_second_grad_relaxation: '
-                f'{relaxation}. Choose "tangent" or "piecewise".')
+                f'{relaxation}. Choose "tangent", "piecewise", or '
+                '"piecewise-pivot".')
         # The historical tangent-to-secant construction is a fixed relaxation.
-        # The piecewise construction exposes explicit admissible tangent-point
-        # intervals and is the only sigmoid'' relaxation optimized by
-        # alpha-CROWN.
-        self.optimizable = self.sigmoid_second_grad_relaxation == 'piecewise'
+        # The piecewise constructions expose explicit admissible tangent-point
+        # intervals and are optimized by alpha-CROWN.
+        self.optimizable = self.sigmoid_second_grad_relaxation in [
+            'piecewise', 'piecewise-pivot']
 
     def opt_init(self):
         super().opt_init()
@@ -1665,6 +1668,8 @@ class BoundSigmoidSecondGrad(BoundOptimizableActivation):
 
         if self.sigmoid_second_grad_relaxation == 'piecewise':
             self._bound_relax_piecewise(lower, upper)
+        elif self.sigmoid_second_grad_relaxation == 'piecewise-pivot':
+            self._bound_relax_piecewise_pivot(lower, upper)
         else:
             self._bound_relax_tangent(lower, upper)
 
@@ -1880,6 +1885,181 @@ class BoundSigmoidSecondGrad(BoundOptimizableActivation):
         self.add_linear_relaxation(
             mask=mask_cross_upper_direct, type='upper',
             k=k_direct, x0=lower, y0=y_l)
+
+    def _bound_relax_piecewise_pivot(self, lower, upper):
+        """Relax sigmoid'' with slope alpha values through tangent pivots."""
+        y_l, y_u = self.forward(lower), self.forward(upper)
+        k_direct = (y_u - y_l) / (upper - lower).clamp(min=1e-8)
+        midpoint = (lower + upper) / 2
+        a = lower.new_tensor(self.outer_inflection_point)
+
+        dl, du, has_dl, has_du = self.retrieve_from_precompute(
+            upper, flip=False)
+        dl_, du_, has_dl_, has_du_ = self.retrieve_from_precompute(
+            lower, flip=True)
+
+        mask_convex = torch.logical_or(
+            upper <= -a,
+            torch.logical_and(lower >= 0, upper <= a))
+        mask_concave = torch.logical_or(
+            torch.logical_and(lower >= -a, upper <= 0),
+            lower >= a)
+
+        mask_lower_left = torch.logical_and(
+            lower < -a, torch.logical_and(upper > -a, upper < 0))
+        mask_lower_cross_zero = torch.logical_and(
+            lower < 0, torch.logical_and(upper >= 0, upper < a))
+        mask_lower_cross_both = torch.logical_and(lower < 0, upper >= a)
+        mask_lower_right = torch.logical_and(
+            torch.logical_and(lower >= 0, lower < a), upper > a)
+
+        mask_lower_left_tangent = torch.logical_and(
+            mask_lower_left, torch.logical_and(has_dl, dl > lower))
+        mask_lower_left_direct = torch.logical_and(
+            mask_lower_left, torch.logical_and(has_dl, dl <= lower))
+        mask_lower_cross_zero_tangent = torch.logical_and(
+            mask_lower_cross_zero, torch.logical_and(has_dl_, dl_ < upper))
+        mask_lower_cross_zero_direct = torch.logical_and(
+            mask_lower_cross_zero, torch.logical_and(has_dl_, dl_ >= upper))
+        mask_lower_cross_both_tangent = torch.logical_and(
+            mask_lower_cross_both, torch.logical_and(has_dl_, has_dl))
+        mask_lower_right_tangent = torch.logical_and(
+            mask_lower_right, torch.logical_and(has_dl, dl > lower))
+        mask_lower_right_direct = torch.logical_and(
+            mask_lower_right, torch.logical_and(has_dl, dl <= lower))
+
+        mask_cross_lower_tangent = torch.logical_or(
+            torch.logical_or(mask_lower_left_tangent,
+                             mask_lower_cross_zero_tangent),
+            torch.logical_or(mask_lower_cross_both_tangent,
+                             mask_lower_right_tangent))
+        mask_cross_lower_direct = torch.logical_or(
+            torch.logical_or(mask_lower_left_direct,
+                             mask_lower_cross_zero_direct),
+            mask_lower_right_direct)
+
+        mask_upper_left = torch.logical_and(
+            lower < -a, torch.logical_and(upper > -a, upper <= 0))
+        mask_upper_cross_zero = torch.logical_and(
+            torch.logical_and(lower > -a, lower < 0), upper > 0)
+        mask_upper_cross_both = torch.logical_and(lower <= -a, upper > 0)
+        mask_upper_right = torch.logical_and(
+            torch.logical_and(lower > 0, lower < a), upper > a)
+        mask_upper_zero_to_right = torch.logical_and(lower == 0, upper > a)
+
+        mask_upper_left_tangent = torch.logical_and(
+            mask_upper_left, torch.logical_and(has_du_, du_ < upper))
+        mask_upper_left_direct = torch.logical_and(
+            mask_upper_left, torch.logical_and(has_du_, du_ >= upper))
+        mask_upper_cross_zero_tangent = torch.logical_and(
+            mask_upper_cross_zero, torch.logical_and(has_du, du > lower))
+        mask_upper_cross_zero_direct = torch.logical_and(
+            mask_upper_cross_zero, torch.logical_and(has_du, du <= lower))
+        mask_upper_cross_both_tangent = torch.logical_and(
+            mask_upper_cross_both, torch.logical_and(has_du_, has_du))
+        mask_upper_right_tangent = torch.logical_and(
+            mask_upper_right, torch.logical_and(has_du_, du_ < upper))
+        mask_upper_right_direct = torch.logical_and(
+            mask_upper_right, torch.logical_and(has_du_, du_ >= upper))
+
+        mask_cross_upper_tangent = torch.logical_or(
+            torch.logical_or(mask_upper_left_tangent,
+                             mask_upper_cross_zero_tangent),
+            torch.logical_or(mask_upper_cross_both_tangent,
+                             mask_upper_right_tangent))
+        mask_cross_upper_direct = torch.logical_or(
+            torch.logical_or(mask_upper_left_direct,
+                             mask_upper_cross_zero_direct),
+            torch.logical_or(mask_upper_right_direct,
+                             mask_upper_zero_to_right))
+
+        def tangent_pivot(left, right):
+            left_slope = d3sigmoid(left)
+            right_slope = d3sigmoid(right)
+            left_bias = self.forward(left) - left_slope * left
+            right_bias = self.forward(right) - right_slope * right
+            denominator = left_slope - right_slope
+            parallel = denominator.abs() < 1e-8
+            safe_denominator = torch.where(
+                parallel, torch.ones_like(denominator), denominator)
+            pivot = (right_bias - left_bias) / safe_denominator
+            pivot = torch.where(parallel, (left + right) / 2, pivot)
+            pivot_value = left_slope * (pivot - left) + self.forward(left)
+            slope_low = torch.minimum(left_slope, right_slope)
+            slope_high = torch.maximum(left_slope, right_slope)
+            return pivot, pivot_value, (slope_low + slope_high) / 2, slope_low, slope_high
+
+        if self.opt_stage in ['opt', 'reuse']:
+            if not hasattr(self, 'alpha'):
+                self._no_bound_parameters()
+            ns = self._start
+            alpha = self.alpha[ns]
+        else:
+            alpha = None
+
+        def add_pivot(mask, left, right, slot, init_store, bound_type):
+            pivot, pivot_value, initial_slope, slope_low, slope_high = (
+                tangent_pivot(left, right))
+            if self.opt_stage in ['opt', 'reuse']:
+                self._clamp_alpha_masked(
+                    alpha[slot], slope_low, slope_high, mask)
+                slope = alpha[slot]
+            else:
+                slope = initial_slope
+                if self.opt_stage == 'init':
+                    ns = self._start
+                    if init_store[ns] is None:
+                        init_store[ns] = initial_slope.detach().clone()
+                    else:
+                        self._set_init_tangent_points(
+                            init_store[ns], mask, initial_slope)
+            self.add_linear_relaxation(
+                mask=mask, type=bound_type, k=slope,
+                x0=pivot, y0=pivot_value)
+
+        if self.opt_stage == 'init':
+            ns = self._start
+            for store in [self.tp_convex_lower_init,
+                          self.tp_concave_upper_init,
+                          self.tp_cross_lower_init,
+                          self.tp_cross_upper_init]:
+                store[ns] = None
+
+        stores = [
+            self.tp_convex_lower_init,
+            self.tp_concave_upper_init,
+            self.tp_cross_lower_init,
+            self.tp_cross_upper_init,
+        ] if self.opt_stage == 'init' else [None] * 4
+
+        add_pivot(mask_convex, lower, upper, slice(0, 2),
+                  stores[0], 'lower')
+        add_pivot(mask_concave, lower, upper, slice(2, 4),
+                  stores[1], 'upper')
+
+        add_pivot(mask_cross_lower_tangent, torch.where(
+            mask_lower_left_tangent, lower, torch.where(
+                mask_lower_cross_zero_tangent, dl_, torch.where(
+                    mask_lower_cross_both_tangent, dl_, lower))),
+            torch.where(mask_lower_left_tangent, dl, torch.where(
+                mask_lower_cross_zero_tangent, upper, torch.where(
+                    mask_lower_cross_both_tangent, dl, dl))),
+            slice(4, 6), stores[2], 'lower')
+        add_pivot(mask_cross_upper_tangent, torch.where(
+            mask_upper_left_tangent, du_, torch.where(
+                mask_upper_cross_zero_tangent, lower, torch.where(
+                    mask_upper_cross_both_tangent, du_, du_))),
+            torch.where(mask_upper_left_tangent, upper, torch.where(
+                mask_upper_cross_zero_tangent, du, torch.where(
+                    mask_upper_cross_both_tangent, du, upper))),
+            slice(6, 8), stores[3], 'upper')
+
+        self.add_linear_relaxation(
+            mask=mask_cross_lower_direct, type='lower', k=k_direct,
+            x0=lower, y0=y_l)
+        self.add_linear_relaxation(
+            mask=mask_cross_upper_direct, type='upper', k=k_direct,
+            x0=lower, y0=y_l)
 
     def _bound_relax_tangent(self, lower, upper):
         """Historical fixed relaxation using tangents parallel to secants."""
